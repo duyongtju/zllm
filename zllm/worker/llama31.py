@@ -27,6 +27,7 @@ from torch import nn
 import torch.nn.functional as F
 import numpy as np
 
+from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
 from tokenizer import Tokenizer
 
 # -----------------------------------------------------------------------------
@@ -47,6 +48,7 @@ class ModelArgs:
     max_batch_size: int = 32
     max_seq_len: int = 2048
     flash: bool = False # use flash attention?
+    paged: bool = False # use paged attention?
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -235,12 +237,16 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer=None):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        # if not args.paged:
+        #     self.attention = Attention(args)
+        # else:
+        self.attention = BaseAttentionWrapper(args, layer=layer)
+
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -270,7 +276,7 @@ class Transformer(nn.Module):
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
         self.layers = nn.ModuleList(
-            TransformerBlock(params) for _ in range(params.n_layers)
+            TransformerBlock(params, i) for i in range(params.n_layers)
         )
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
@@ -384,6 +390,7 @@ class Llama:
         max_seq_len: int,
         max_batch_size: int,
         flash: bool = False,
+        paged: bool = False,
         model_parallel_size: Optional[int] = 1,
         seed: int = 1,
     ) -> "Llama":
@@ -408,6 +415,7 @@ class Llama:
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
             flash=flash,
+            paged=paged,
             **params,
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
@@ -454,16 +462,23 @@ class Llama:
 
         # install KV cache in all the Attention layers
         for block in self.model.layers:
-            layer_dtype = block.attention.wq.weight.dtype
-            layer_device = block.attention.wq.weight.device
-            block.attention.cache = KVCache(
-                batch_size=bsz,
-                seq_length=total_len,
-                n_kv_heads=params.n_kv_heads,
-                head_dim=params.dim // params.n_heads,
-                dtype=layer_dtype,
-                device=layer_device,
-            )
+            if not params.paged:
+                layer_dtype = block.attention.wq.weight.dtype
+                layer_device = block.attention.wq.weight.device
+                block.attention.cache = KVCache(
+                    batch_size=bsz,
+                    seq_length=total_len,
+                    n_kv_heads=params.n_kv_heads,
+                    head_dim=params.dim // params.n_heads,
+                    dtype=layer_dtype,
+                    device=layer_device,
+                )
+            else:
+                block.attention.init_gpu_cache(
+                    bsz,
+                    max_seq_len=2048,
+                    num_gpu_blocks=500,
+                )
 
         pad_id = self.tokenizer.pad_id
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
