@@ -19,9 +19,9 @@ def main2(
     tokenizer_path: str,
     temperature: float = 0.6,
     top_p: float = 0.9,
-    max_seq_len: int = 512,
+    max_seq_len: int = 2048,
     max_batch_size: int = 4,
-    max_gen_len: Optional[int] = None,
+    max_gen_len: Optional[int] = 1024,
 ):
     """
     Examples to run with the models finetuned for chat. Prompts correspond of chat
@@ -174,7 +174,7 @@ def init_process(fn,
     max_gen_len: Optional[int] = None,):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29540'
     dist.init_process_group('nccl', rank=rank, world_size=size)
     fn(input_queue, output_queue, ckpt_dir, tokenizer_path, temperature, top_p, 
         max_seq_len, max_batch_size, max_gen_len)
@@ -216,4 +216,4 @@ def run(
         output_queue.put(results)
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(main2)

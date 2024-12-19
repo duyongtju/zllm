@@ -19,6 +19,8 @@ from fairscale.nn.model_parallel.initialize import (
 )
 from torch import nn
 
+from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
+
 
 @dataclass
 class ModelArgs:
@@ -62,9 +64,12 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    assert freqs_cis.shape == (x.shape[0], x.shape[-1]) # x: (n_tokens, n_head, head_dim)
+    shape = [freqs_cis.shape[0], 1, freqs_cis.shape[1]]
     return freqs_cis.view(*shape)
+    # assert freqs_cis.shape == (x.shape[1], x.shape[-1]) # x (bs, seqlen, n_head, head_dim)
+    # shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    # return freqs_cis.view(*shape)
 
 
 def apply_rotary_emb(
@@ -72,12 +77,18 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+        xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+        freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+        xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(2)
+        xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(2)
+        return xq_out.type_as(xq), xk_out.type_as(xk)
+    # xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    # xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    # freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    # xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    # xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    # return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -93,7 +104,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         model_parallel_size = fs_init.get_model_parallel_world_size()
@@ -101,6 +112,8 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
+
+        self.layer_id = layer_id
 
         self.wq = ColumnParallelLinear(
             args.dim,
@@ -148,51 +161,83 @@ class Attention(nn.Module):
             )
         ).cuda()
 
+        self.freqs_cis = precompute_freqs_cis(
+            args.dim // args.n_heads,
+            args.max_seq_len * 2,
+            args.rope_theta,
+        )
+
+
     def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-    ):
-        bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            attention_backend_wrapper: BaseAttentionWrapper,
+        ) -> torch.Tensor:
+        n_tokens, _ = hidden_states.shape
+        xq, xk, xv = self.wq(hidden_states), self.wk(hidden_states), self.wv(hidden_states) # (bs, seqlen, n_head * head_dim)
+        xq = xq.view(n_tokens, self.n_local_heads, self.head_dim)
+        xk = xk.view(n_tokens, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(n_tokens, self.n_local_kv_heads, self.head_dim)
+        
+        freqs_cis_position = [i for i in positions]
+        freqs_cis = self.freqs_cis[freqs_cis_position, :]
+        # freqs_cis = torch.tensor(freqs_cis, dtype=xq.dtype, device=xq.device)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        scale=self.head_dim**-0.5
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(
-            keys, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(
-            values, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(
-            1, 2
-        )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        output = attention_backend_wrapper.forward2(
+            xq, xk, xv, self.layer_id, scale
+        )
+        output = output.contiguous().view(n_tokens, self.n_local_heads*self.head_dim)
         return self.wo(output)
+
+    # def forward(
+    #     self,
+    #     x: torch.Tensor,
+    #     start_pos: int,
+    #     freqs_cis: torch.Tensor,
+    #     mask: Optional[torch.Tensor],
+    # ):
+    #     bsz, seqlen, _ = x.shape
+    #     xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+    #     xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+    #     xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+    #     xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+    #     xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+    #     self.cache_k = self.cache_k.to(xq)
+    #     self.cache_v = self.cache_v.to(xq)
+
+    #     self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+    #     self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
+    #     keys = self.cache_k[:bsz, : start_pos + seqlen]
+    #     values = self.cache_v[:bsz, : start_pos + seqlen]
+
+    #     # repeat k/v heads if n_kv_heads < n_heads
+    #     keys = repeat_kv(
+    #         keys, self.n_rep
+    #     )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+    #     values = repeat_kv(
+    #         values, self.n_rep
+    #     )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+
+    #     xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+    #     keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+    #     values = values.transpose(
+    #         1, 2
+    #     )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+    #     scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+    #     if mask is not None:
+    #         scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+    #     scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+    #     output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+    #     output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+    #     return self.wo(output)
 
 
 class FeedForward(nn.Module):
@@ -230,7 +275,7 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        self.attention = Attention(layer_id, args)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -241,16 +286,27 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
+
     def forward(
         self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-    ):
-        h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        attention_backend_wrapper: BaseAttentionWrapper,
+    ) -> torch.Tensor:
+        h = hidden_states + self.attention(self.attention_norm(hidden_states), positions, attention_backend_wrapper)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
+
+    # def forward(
+    #     self,
+    #     x: torch.Tensor,
+    #     start_pos: int,
+    #     freqs_cis: torch.Tensor,
+    #     mask: Optional[torch.Tensor],
+    # ):
+    #     h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
+    #     out = h + self.feed_forward(self.ffn_norm(h))
+    #     return out
 
 
 class Transformer(nn.Module):
@@ -280,28 +336,36 @@ class Transformer(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int):
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+    # def forward(self, tokens: torch.Tensor, start_pos: int):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        attention_backend_wrapper: BaseAttentionWrapper,
+    ) -> torch.Tensor:
+        # _bsz, seqlen = tokens.shape
+        h = self.tok_embeddings(hidden_states)
 
-        mask = None
-        if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
+        # self.freqs_cis = self.freqs_cis.to(h.device)
+        # freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
-            mask = torch.triu(mask, diagonal=1)
+        # mask = None
+        # if seqlen > 1:
+        #     mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
 
-            # When performing key-value caching, we compute the attention scores
-            # only for the new sequence. Thus, the matrix of scores is of size
-            # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # j > cache_len + i, since row i corresponds to token cache_len + i.
-            mask = torch.hstack(
-                [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
-            ).type_as(h)
+        #     mask = torch.triu(mask, diagonal=1)
 
-        for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+        #     # When performing key-value caching, we compute the attention scores
+        #     # only for the new sequence. Thus, the matrix of scores is of size
+        #     # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
+        #     # j > cache_len + i, since row i corresponds to token cache_len + i.
+        #     mask = torch.hstack(
+        #         [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
+        #     ).type_as(h)
+
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+            h = layer(h, positions, attention_backend_wrapper)
         h = self.norm(h)
         output = self.output(h).float()
         return output

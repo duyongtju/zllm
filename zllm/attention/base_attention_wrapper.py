@@ -10,6 +10,8 @@ import math
 
 import torch.nn.functional as F
 from flash_attn import flash_attn_with_kvcache
+import flashinfer
+
 
 from zllm.config.config import ModelArgs, CacheConfig
 from zllm.datatypes.sequence import Sequence
@@ -18,7 +20,7 @@ from zllm.datatypes.sequence import Sequence
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
-        self.flash = args.flash # use flash attention?
+        # self.flash = args.flash # use flash attention?
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         # model_parallel_size = fs_init.get_model_parallel_world_size()
         model_parallel_size = 1 # AK: model parallel size is 1 for 1 GPU
@@ -78,40 +80,26 @@ class Attention(nn.Module):
 
 
 class BaseAttentionWrapper(Attention):
-    def __init__(self, args: ModelArgs, layer=0):
+    def __init__(self, args: ModelArgs):
         super().__init__(args)
         self.model_config: ModelArgs = args
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         self.kv_cache = None
-        self.cache = None
-        self.layer=layer
+        # self.cache = None
 
+        self.flash_attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            torch.empty(128*1024*1024, dtype=torch.uint8, device="cuda")
+        )
         # self.cache_config: CacheConfig = kwargs.pop('cache_config', {})
         # self.cache = self.init_cache_engine()
 
         # self.attn = Attention(self.model_config)
-
-    
-    # def load_state_dict(self, state_dict, strict=True):
-    #     self.attn.load_state_dict(state_dict, strict=strict)
-
-    # def forward(
-    #     self,
-    #     x: torch.Tensor,
-    #     start_pos: int,
-    #     freqs_cis: torch.Tensor,
-    #     mask: Optional[torch.Tensor],
-    # ):
-    #     return super().forward(x, start_pos, freqs_cis, mask)
-        # return self.attn.forward(x, start_pos, freqs_cis, mask)
         
     def init_gpu_cache(self, bs: int, 
                        max_seq_len: int, 
                        num_gpu_blocks: int,
                        block_size: int = 256,
                        ) -> None:
-        if not self.model_config.paged:
-            return
 
         self.num_gpu_blocks = num_gpu_blocks
         self.block_size = block_size
@@ -119,15 +107,22 @@ class BaseAttentionWrapper(Attention):
         self.kv_device = self.wk.weight.device
         self.n_layers = self.model_config.n_layers
 
-        self.kv_cache = self.get_cache_block(
-            self.num_gpu_blocks, dtype=self.kv_dtype, device=self.kv_device,
-        )
+        self.device = self.kv_device
+
+        self.layered_kv_cahce = []
+        for i in range(self.n_layers):
+            kv_cache = self.get_cache_block(
+                self.num_gpu_blocks, dtype=self.kv_dtype, device=self.kv_device,
+            )
+            self.layered_kv_cahce.append(kv_cache)
 
         num_blocks_per_seq = (max_seq_len + self.block_size - 1)//self.block_size
         blocks = random.sample(range(0, num_gpu_blocks), num_blocks_per_seq*bs)
         block_tables = []
         for i in range(bs):
-            block_tables.append(blocks[i*num_blocks_per_seq:(i+1)*num_blocks_per_seq])
+            seq_block_start = i*num_blocks_per_seq
+            seq_block_end = (i+1)*num_blocks_per_seq
+            block_tables.append(blocks[seq_block_start:seq_block_end])
         self.block_tables = torch.tensor(block_tables, device=self.kv_device, dtype=torch.int32)
         self.cached_seq_len = torch.tensor([0]*bs, device=self.kv_device, dtype=torch.int32)
 
@@ -146,23 +141,140 @@ class BaseAttentionWrapper(Attention):
             **kwargs,))
 
     def begin_forward(self, seq_list: List[Sequence]):
-        block_tables = []
-        for seq in seq_list:
-            blocks = [logical_block.block_number for logical_block in seq.logical_token_blocks]    
-            block_tables.append(blocks)
-        self._step_block_tables = torch.tensor(block_tables, dtype=torch.int32)
+        # prepare qo_indptr for example [0, 33, 44, 55, 66, 77, 88, 100]
+        # paged_kv_indices [ 1, 2, 3, 4, 5 ]
+        # paged_kv_indptr [ 0, 2, 5, ...] seq_1 page: 1 2; seq_2 page 3 4 5  
+        # paged_kv_last_page_len [1, 7, 14, 4, 3, 1, 16]  1 <= paged_kv_last_page_len <= page_size
+        qo_indptr = [0]        
+        paged_kv_indices = []
+        paged_kv_indptr = [0]
+        paged_kv_last_page_len = []
 
-        cached_seq_len = []
-        for seq in seq_list:
-            # todo: fixme 加入已缓存的 token 长度
-            cached_seq_len.append(0)
-        self.cached_seq_len = torch.tensor(cached_seq_len, dtype=torch.int32)
+        append_qo_indptr = [0]
+        append_kv_page_indices = []
+        append_kv_page_indptr = [0]
+        append_kv_last_page_len = []
 
-    # def kv_cache_dtype(self) -> torch.dtype:
-    #     self.attn.wq.weight.dtype
-    
-    # def kv_cache_device(self) -> torch.device:
-    #     self.attn.wq.weight.device
+
+        for seq in seq_list:                
+            seq_id = int(seq.seq_id)
+            if seq.prompt_processing_finished: # prefill phase
+                continue
+            last_page_len = seq.get_prompt_len() % self.block_size or self.block_size
+
+            qo_indptr.append(qo_indptr[-1]+len(seq.prompt_token_ids))
+            kv_page_start = 0
+            kv_page_num = (len(seq.prompt_token_ids) + self.block_size -1) // self.block_size
+            paged_kv_indices.extend(self.block_tables[seq_id][kv_page_start:kv_page_num])
+            paged_kv_indptr.append(paged_kv_indptr[-1]+kv_page_num)
+            paged_kv_last_page_len.append(last_page_len)
+
+            append_qo_indptr.append(append_qo_indptr[-1]+len(seq.prompt_token_ids))
+            append_kv_page_start = 0
+            append_kv_page_end = (len(seq.prompt_token_ids) + self.block_size -1) // self.block_size
+            append_kv_page_indices.extend(self.block_tables[seq_id][append_kv_page_start:append_kv_page_end])
+            append_kv_page_indptr.append(append_kv_page_indptr[-1]+append_kv_page_end-append_kv_page_start)
+            append_kv_last_page_len.append(last_page_len)
+
+        for seq in seq_list:
+            seq_id = int(seq.seq_id)
+            if not seq.prompt_processing_finished: # decode phase
+                continue
+            context_len = len(seq.get_token_ids())
+            last_page_len = context_len%self.block_size or self.block_size
+
+            qo_indptr.append(qo_indptr[-1]+1)
+
+            kv_page_start = (context_len + self.block_size -1) // self.block_size -1
+            kv_page_num = (context_len + self.block_size -1) // self.block_size
+
+            paged_kv_indices.extend(self.block_tables[seq_id][kv_page_start:kv_page_num])
+            paged_kv_indptr.append(paged_kv_indptr[-1]+1)
+            paged_kv_last_page_len.append(last_page_len)
+
+            append_qo_indptr.append(append_qo_indptr[-1]+1)
+            append_kv_page_indices.extend(self.block_tables[seq_id][kv_page_start:kv_page_num])
+            append_kv_page_indptr.append(append_kv_page_indptr[-1]+1)
+            append_kv_last_page_len.append(last_page_len)
+        
+        qo_indptr = self.to_int_tensor(qo_indptr)
+        paged_kv_indptr = self.to_int_tensor(paged_kv_indptr)
+        paged_kv_indices = self.to_int_tensor(paged_kv_indices)
+        paged_kv_last_page_len = self.to_int_tensor(paged_kv_last_page_len)
+
+        self.append_qo_indptr_tensor = self.to_int_tensor(append_qo_indptr)
+        self.append_kv_page_indices_tensor = self.to_int_tensor(append_kv_page_indices)
+        self.append_kv_page_indptr_tensor = self.to_int_tensor(append_kv_page_indptr)
+        self.append_kv_last_page_len_tensor = self.to_int_tensor(append_kv_last_page_len)
+
+        print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {paged_kv_indptr}")
+        print(f"paged_kv_indices {paged_kv_indices} \npaged_kv_last_page_len {paged_kv_last_page_len}")
+        print(f"self.block_tables {self.block_tables}")
+
+        self.flash_attn_wrapper.plan(
+            qo_indptr,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            self.model_config.n_heads,
+            self.n_kv_heads,
+            self.model_config.dim,
+            self.block_size,
+            causal=True
+        )
+
+    def end_forward(self):
+        self.flash_attn_wrapper.end_forward()
+
+    def forward2(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_cache_idx: int,
+        softmax_scale: float = 1.0,
+        layer_id: Optional[int] = None,
+    ) -> torch.Tensor:
+        
+        query = query.contiguous().reshape(-1, self.model_config.n_heads, self.head_dim)
+        key = key.contiguous().reshape(-1, self.model_config.n_kv_heads, self.head_dim)
+        value = value.contiguous().reshape(-1, self.model_config.n_kv_heads, self.head_dim)
+        
+        if layer_cache_idx == 0:
+            print(f"layer {layer_cache_idx} \n"+"="*20)
+            print(f"query {query.shape}")
+            print(f"key {key.shape}")
+            print(f"value {value.shape}")
+            print(f"layered_kv_cahce[{layer_cache_idx}][0]: {self.layered_kv_cahce[layer_cache_idx][0].shape}")
+            print(f"self.append_qo_indptr_tensor {self.append_qo_indptr_tensor}")
+            print(f"self.append_kv_page_indices_tensor {self.append_kv_page_indices_tensor}")
+            print(f"self.append_kv_page_indptr_tensor {self.append_kv_page_indptr_tensor}")
+            print(f"self.append_kv_last_page_len_tensor {self.append_kv_last_page_len_tensor}")
+            print("\n\n")
+
+        flashinfer.append_paged_kv_cache(
+            key,
+            value,
+            self.append_qo_indptr_tensor,
+            self.layered_kv_cahce[layer_cache_idx],
+            self.append_kv_page_indices_tensor,
+            self.append_kv_page_indptr_tensor,
+            self.append_kv_last_page_len_tensor
+        )
+
+        output = self.flash_attn_wrapper.forward(
+            query,
+            self.layered_kv_cahce[layer_cache_idx],
+            causal=True,
+            pos_encoding_mode="NONE",
+            sm_scale=softmax_scale,
+        )
+        return output
+
+
+    def to_int_tensor(self, data: List[int]) -> torch.Tensor:
+        return torch.tensor(data, dtype=torch.int32, device="cuda")
+
 
     def forward(
         self,
@@ -229,6 +341,7 @@ class BaseAttentionWrapper(Attention):
         proj = self.wo(output)
         return proj
     
+
     def raw_forward(
         self,
         x: torch.Tensor,

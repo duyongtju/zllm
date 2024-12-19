@@ -4,6 +4,8 @@ from typing import List, Optional
 
 from zllm.datatypes.block import LogicalTokenBlock
 from zllm.datatypes.sequence_status import SequenceStatus
+from zllm.datatypes.sampling_params import SamplingParams
+from zllm.datatypes.sequence_state import SequenceState
 
 class Sequence:
     """Stores the data, status, and block information of a sequence.
@@ -24,7 +26,7 @@ class Sequence:
         block_size: int,
         eos_token_id: int,
         arrival_time: float,
-        sampling_params#: SamplingParams,
+        sampling_params: SamplingParams,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
@@ -52,7 +54,7 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
 
-        # self.state = SequenceState(seq_id, arrival_time, len(prompt_token_ids))
+        self.state = SequenceState(seq_id, arrival_time, len(prompt_token_ids))
 
     def get_status(self) -> SequenceStatus:
         return self.state._status

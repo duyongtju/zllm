@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
+import itertools
 import json
 import os
 import sys
@@ -19,6 +20,12 @@ from fairscale.nn.model_parallel.initialize import (
 
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import ChatFormat, Dialog, Message, Tokenizer
+
+
+from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
+from zllm.datatypes.sampling_params import SamplingParams
+from zllm.datatypes.sequence import Sequence
+from zllm.datatypes.sequence_state import SequenceStatus
 
 
 class CompletionPrediction(TypedDict, total=False):
@@ -235,6 +242,137 @@ class Llama:
             out_logprobs.append(probs)
         return (out_tokens, out_logprobs if logprobs else None)
 
+    @torch.inference_mode()
+    def generate_with_attn_wrapper(
+        self,
+        prompts: List[str],
+        prompt_tokens: List[List[int]],
+        max_gen_len: int = 512,
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        logprobs: bool = False,
+        echo: bool = False,
+    ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
+        """
+        Generate text sequences based on provided prompts using the language generation model.
+
+        Args:
+            prompt_tokens (List[List[int]]): List of tokenized prompts, where each prompt is represented as a list of integers.
+            max_gen_len (int): Maximum length of the generated text sequence.
+            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
+            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
+            logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
+            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
+
+        Returns:
+            Tuple[List[List[int]], Optional[List[List[float]]]]: A tuple containing generated token sequences and, if logprobs is True, corresponding token log probabilities.
+
+        Note:
+            This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
+            If logprobs is True, token log probabilities are computed for each generated token.
+
+        """
+
+        stop = []
+        for t in self.tokenizer.stop_tokens:
+            stop.append(self.tokenizer.decode([t,]))
+
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop
+        )
+
+        block_size = 256
+        block_num = 100
+        seqs: List[Sequence] = []
+        for i in range(len(prompts)):
+            prompt = prompts[i]
+            step_tokens = prompt_tokens[i]
+
+            eos_token_id = self.tokenizer.eos_id
+            seq = Sequence(str(i), prompt, step_tokens, 
+                     block_size, eos_token_id, time.time(), sampling_params)
+            seqs.append(seq)
+
+        for seq in seqs:
+            seq.set_status(SequenceStatus.RUNNING)
+
+        attn_wrapper = BaseAttentionWrapper(self.model.params)
+        attn_wrapper.init_gpu_cache(len(prompts), self.model.params.max_seq_len, block_num, block_size)
+
+        n_step = 0
+        while True:
+            n_step += 1
+            print(f"step {n_step}")
+
+            step_tokens = []
+            step_seqs: List[Sequence] = []
+            step_positions = []
+            step_seqlen = []
+            for seq in seqs:
+                if seq.is_finished():
+                    continue
+
+                if seq.get_output_len() > 128:
+                    continue
+                
+                step_seqs.append(seq)
+                if not seq.prompt_processing_finished:
+                    step_tokens.extend(seq.prompt_token_ids)
+                    seq_positions = list(range(len(seq.prompt_token_ids)))
+                    step_seqlen.append(len(seq.prompt_token_ids))
+                else:
+                    step_tokens.append(seq.output_token_ids[-1])
+                    seq_positions = [len(seq.get_token_ids())-1]
+                    step_seqlen.append(1)
+                step_positions.extend(seq_positions)
+
+            if len(step_seqs) == 0:
+                break
+            
+            attn_wrapper.begin_forward(step_seqs)
+
+            step_tokens = torch.tensor(step_tokens, dtype=torch.int32, device='cuda')
+            step_positions = torch.tensor(step_positions, dtype=torch.int32, device='cuda')
+            logits = self.model.forward(step_tokens, step_positions, attn_wrapper)
+
+            assert logits.size(0) == len(step_tokens), f"length {logits.size(0)} of logits must equal to step_seqs {len(step_tokens)}"
+
+            next_token_idx = [i-1 for i in itertools.accumulate(step_seqlen)]
+            next_token_logits = logits[next_token_idx]
+
+            if temperature > 0:
+                probs = torch.softmax(next_token_logits / temperature, dim=-1)
+                next_token = sample_top_p(probs, top_p)
+            else:
+                next_token = torch.argmax(next_token_logits, dim=-1)
+
+            next_token = next_token.flatten().tolist()
+            assert len(next_token) == len(step_seqs), f"next_token {len(next_token)} must equal to len(step_seqs) {len(step_seqs)}"
+
+            for i in range(len(step_seqs)):
+                seq = step_seqs[i]
+                token = next_token[i]
+
+                if not seq.prompt_processing_finished:
+                    seq.update_prompt_tokens_processed(seq.get_prompt_len())
+                
+                seq.append_token_id(token)
+
+                if token in self.tokenizer.stop_tokens:
+                    # todo: RUNNING 不能变成 FINISHED_STOPPED
+                    seq.set_status(SequenceStatus.PAUSED)
+                    seq.set_status(SequenceStatus.FINISHED_STOPPED)
+
+            # if n_step > 40:
+            #     break
+
+        
+        out_tokens = [ seq.output_token_ids for seq in seqs ]
+
+        return (out_tokens, None)
+
     def text_completion(
         self,
         prompts: List[str],
@@ -319,7 +457,11 @@ class Llama:
         prompt_tokens = [
             self.formatter.encode_dialog_prompt(dialog) for dialog in dialogs
         ]
-        generation_tokens, generation_logprobs = self.generate(
+        prompts = [
+            self.tokenizer.decode(prompt_token) for prompt_token in prompt_tokens
+        ]
+        generation_tokens, generation_logprobs = self.generate_with_attn_wrapper(
+            prompts=prompts,
             prompt_tokens=prompt_tokens,
             max_gen_len=max_gen_len,
             temperature=temperature,

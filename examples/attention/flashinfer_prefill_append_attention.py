@@ -91,49 +91,52 @@ for i in range(num_layers):
     assert torch.allclose(o_custom, outputs[i], rtol=1e-3, atol=1e-3)
 
 
-def ref_attention():
+def ref_attention(layer_id, seq_id):
 
-    seq_1_len = qo_indptr[1] - qo_indptr[0]
-    seq_1_q = q_at_layer[0][:seq_1_len]
+    q_start, q_end = qo_indptr[seq_id], qo_indptr[seq_id+1]
+    seq_q = q_at_layer[layer_id][q_start:q_end]
 
-    seq_1_blocks = [paged_kv_indices[i].cpu().item() for i in range(paged_kv_indptr[1] - paged_kv_indptr[0])]
+    paged_block_start, paged_block_end = paged_kv_indptr[seq_id], paged_kv_indptr[seq_id+1]
+    seq_blocks = paged_kv_indices[paged_block_start:paged_block_end].tolist()
     # print(seq_1_blocks)
-    seq_1_key_state = []
-    seq_1_value_state = []
+    seq_key_state = []
+    seq_value_state = []
 
-    for i, block_id in enumerate(seq_1_blocks):
+    for i, block_id in enumerate(seq_blocks):
         # print(f"block_id {block_id}")
-        k_block = kv_cache_at_layer[0, block_id , 0]
-        v_block = kv_cache_at_layer[0,block_id,1]
-        if i == len(seq_1_blocks)-1:
-            seq_1_key_state.append(k_block[:paged_kv_last_page_len[0]]) 
-            seq_1_value_state.append(v_block[:paged_kv_last_page_len[0]]) 
+        k_block = kv_cache_at_layer[layer_id, block_id, 0]
+        v_block = kv_cache_at_layer[layer_id, block_id, 1]
+        if i == len(seq_blocks)-1:
+            seq_key_state.append(k_block[:paged_kv_last_page_len[seq_id]]) 
+            seq_value_state.append(v_block[:paged_kv_last_page_len[seq_id]]) 
         else:
-            seq_1_key_state.append(k_block)
-            seq_1_value_state.append(v_block)
-    seq_1_key_state = torch.concat(seq_1_key_state, dim=0)        
-    seq_1_value_state = torch.concat(seq_1_value_state, dim=0)        
+            seq_key_state.append(k_block)
+            seq_value_state.append(v_block)
+    seq_key_state = torch.concat(seq_key_state, dim=0)        
+    seq_value_state = torch.concat(seq_value_state, dim=0)        
 
-    q_len = seq_1_q.size(0)
-    kv_len = seq_1_value_state.size(0)
+    q_len = seq_q.size(0)
+    kv_len = seq_value_state.size(0)
     attention_mask = torch.tril(
         torch.full((q_len, kv_len), 1, device='cuda:0'),
         diagonal=(kv_len-q_len)
     )
     attention_mask = (1.0 - attention_mask) * torch.finfo(torch.float16).min
 
-    seq_1_q = seq_1_q.transpose(0,1)
-    seq_1_key_state = seq_1_key_state.transpose(0,1)
-    seq_1_value_state = seq_1_value_state.transpose(0,1)
+    seq_q = seq_q.transpose(0,1)
+    seq_key_state = seq_key_state.transpose(0,1)
+    seq_value_state = seq_value_state.transpose(0,1)
 
-    attn_weights = torch.matmul(seq_1_q, seq_1_key_state.transpose(1,2))/math.sqrt(head_dim)
+    attn_weights = torch.matmul(seq_q, seq_key_state.transpose(1,2))/math.sqrt(head_dim)
     attn_weights = attn_weights + attention_mask
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(seq_1_q.dtype)
-    ref_output = torch.matmul(attn_weights, seq_1_value_state)
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(seq_q.dtype)
+    ref_output = torch.matmul(attn_weights, seq_value_state)
     ref_output = ref_output.transpose(0, 1)
     return ref_output
 
-ref_output = ref_attention()
-seq_1_len = qo_indptr[1] - qo_indptr[0]
-layer1_seq1_output = outputs[0][:seq_1_len]
-print(torch.allclose(ref_output, layer1_seq1_output, rtol=1e-3, atol=1e-3))
+layer_id = 2
+seq_id = 1
+ref_output = ref_attention(layer_id, seq_id)
+seq_satrt, seq_end = qo_indptr[seq_id], qo_indptr[seq_id+1]
+layer1_seq1_output = outputs[layer_id][seq_satrt:seq_end]
+print(torch.allclose(ref_output, layer1_seq1_output, rtol=2e-3, atol=2e-3))

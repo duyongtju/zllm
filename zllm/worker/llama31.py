@@ -237,15 +237,18 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args: ModelArgs, layer=None):
+    def __init__(self, 
+                 args: ModelArgs, 
+                 layer: int=None, 
+                 attention_wrapper: BaseAttentionWrapper=None):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        # if not args.paged:
-        #     self.attention = Attention(args)
-        # else:
-        self.attention = BaseAttentionWrapper(args, layer=layer)
+        if not args.paged:
+            self.attention = Attention(args)
+        else:
+            self.attention = BaseAttentionWrapper(args, layer=layer)
 
         self.feed_forward = FeedForward(
             dim=args.dim,
