@@ -2,10 +2,10 @@
 
 from typing import List, Optional
 
-from zllm.datatypes.block import LogicalTokenBlock
-from zllm.datatypes.sequence_status import SequenceStatus
-from zllm.datatypes.sampling_params import SamplingParams
-from zllm.datatypes.sequence_state import SequenceState
+from zllm.core.datatypes.block import LogicalTokenBlock
+from zllm.core.datatypes.sequence_status import SequenceStatus
+from zllm.core.datatypes.sampling_params import SamplingParams
+from zllm.core.datatypes.sequence_state import SequenceState
 
 class Sequence:
     """Stores the data, status, and block information of a sequence.

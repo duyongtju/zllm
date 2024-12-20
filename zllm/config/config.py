@@ -1,6 +1,6 @@
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -35,3 +35,15 @@ class ModelArgs:
 class CacheConfig:
     block_size: int = 1024
     block_num: int = 16
+
+@dataclass
+class ParallelConfig:
+    pipeline_parallel_size: int = field(
+        default=2, metadata={"help": "Number of pipeline parallel groups."}
+    )
+    tensor_parallel_size: int = field(
+        default=1, metadata={"help": "Number of tensor parallel groups."}
+    )
+
+    def __post_init__(self):
+        self.world_size = self.pipeline_parallel_size * self.tensor_parallel_size    
