@@ -7,7 +7,7 @@ from typing import List
 
 import torch
 from zllm.config.config import ModelArgs
-from zllm.datatypes.sequence import Sequence
+from zllm.core.datatypes.sequence import Sequence
 from zllm.worker.llama31 import Llama, Transformer
 
 seed = 7

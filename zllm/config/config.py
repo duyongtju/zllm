@@ -47,3 +47,14 @@ class ParallelConfig:
 
     def __post_init__(self):
         self.world_size = self.pipeline_parallel_size * self.tensor_parallel_size    
+
+@dataclass
+class SystemConfig:
+    model_config: ModelArgs = field(default_factory=ModelArgs)
+    # worker_config: WorkerConfig = field(default_factory=WorkerConfig)
+    cache_config: CacheConfig = field(default_factory=CacheConfig)
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    # scheduler_config: BaseSchedulerConfig = field(
+    #     default_factory=SarathiSchedulerConfig
+    # )
+    # metrics_config: MetricsConfig = field(default_factory=MetricsConfig)

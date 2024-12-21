@@ -1,7 +1,7 @@
 import time
 from typing import Optional
 
-from zllm.datatypes.sequence_status import SequenceStatus
+from zllm.core.datatypes.sequence_status import SequenceStatus
 
 
 class SequenceState:

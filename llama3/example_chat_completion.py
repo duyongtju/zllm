@@ -3,6 +3,7 @@
 
 import os
 from typing import List, Optional
+import time
 
 import fire
 
@@ -95,11 +96,11 @@ def main(
     max_batch_size: int = 4,
     max_gen_len: Optional[int] = None,
 ):
-    world_size = 2
-    input_queue = Queue()
-    output_queue = Queue()
+    world_size = 1
+    input_queue = Queue(maxsize=2)
+    output_queue = Queue(maxsize=2)
     processes = []
-    # mp.set_start_method("spawn")
+    mp.set_start_method("spawn", force=True)
     for rank in range(world_size):
         p = mp.Process(target=init_process, args=(
             run,
@@ -112,6 +113,9 @@ def main(
             ))
         p.start()
         processes.append(p)
+    
+    results = output_queue.get()
+    print(f"receive message from out queue {results}")
 
     dialogs: List[Dialog] = [
         [
@@ -144,8 +148,8 @@ These are just a few of the many attractions that Paris has to offer. With so mu
             {"role": "user", "content": "How to go from Beijing to NY?"},
         ],
     ]
-    input_queue.put(dialogs)
-    input_queue.put(dialogs)
+    for _ in range(world_size):
+        input_queue.put_nowait(dialogs)
 
     results = output_queue.get()
     for dialog, result in zip(dialogs, results):
@@ -156,15 +160,16 @@ These are just a few of the many attractions that Paris has to offer. With so mu
         )
         print("\n==================================\n")
 
-    input_queue.put(None)
-    input_queue.put(None)
+    for _ in range(world_size):
+        input_queue.put_nowait(None)  
         
     for p in processes:
         p.join()
 
 def init_process(fn, 
     input_queue, output_queue,
-    rank, size, 
+    rank, 
+    size, 
     ckpt_dir: str,
     tokenizer_path: str,
     temperature: float = 0.6,
@@ -176,8 +181,11 @@ def init_process(fn,
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29540'
     dist.init_process_group('nccl', rank=rank, world_size=size)
-    fn(input_queue, output_queue, ckpt_dir, tokenizer_path, temperature, top_p, 
-        max_seq_len, max_batch_size, max_gen_len)
+    try:
+        fn(input_queue, output_queue, ckpt_dir, tokenizer_path, temperature, top_p, 
+            max_seq_len, max_batch_size, max_gen_len)
+    except Exception as e:  
+        print(f"run exception {e}")
 
 def run(
     input_queue: Optional[Queue],
@@ -196,9 +204,14 @@ def run(
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
     )
+    try:
+        output_queue.put_nowait("init done")
+    except Exception as e:
+        print(f"put queue exception {e}")
 
     while True:
-        input = input_queue.get()
+        input = input_queue.get(timeout=1)
+        print(f"work {dist.get_rank()} get input {input}")
         if input is None:
             return
         dialogs = input
@@ -213,7 +226,7 @@ def run(
         if dist.get_rank() != 0:
             continue
 
-        output_queue.put(results)
+        output_queue.put_nowait(results)
 
 if __name__ == "__main__":
     fire.Fire(main2)

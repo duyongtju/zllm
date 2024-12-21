@@ -47,7 +47,7 @@ class SampleScheduler(BaseScheduler):
         self.running = running
         return SchedulerOutputs(
             self._iteration_id,
-            ingored_seq_ids=ingored_seq_ids,
+            ignored_seq_ids=ingored_seq_ids,
             preempted_seq_ids=preempted_seq_ids,
             scheduled_seq_metadata_list=scheduled_seq_metadata_list,
         )

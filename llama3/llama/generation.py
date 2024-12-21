@@ -23,9 +23,12 @@ from llama.tokenizer import ChatFormat, Dialog, Message, Tokenizer
 
 
 from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
-from zllm.datatypes.sampling_params import SamplingParams
-from zllm.datatypes.sequence import Sequence
-from zllm.datatypes.sequence_state import SequenceStatus
+from zllm.config.config import SystemConfig
+from zllm.core.datatypes.sampling_params import SamplingParams
+from zllm.core.datatypes.sequence import SamplerOutput, SamplerOutputs, Sequence, SequenceMetadata
+from zllm.core.datatypes.sequence_state import SequenceStatus
+from zllm.core.datatypes.step_inputs import StepInputs
+from zllm.core.sequence_manager.worker_sequence_manager import WorkerSequenceManager
 
 
 class CompletionPrediction(TypedDict, total=False):
@@ -50,6 +53,7 @@ def set_up(rank, size, backend='nccl'):
 class Llama:
     @staticmethod
     def build(
+        config: SystemConfig,
         ckpt_dir: str,
         tokenizer_path: str,
         max_seq_len: int,
@@ -126,9 +130,10 @@ class Llama:
         model.load_weight(checkpoint)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
-        return Llama(model, tokenizer)
+        return Llama(config, model, tokenizer)
 
-    def __init__(self, model: Transformer, tokenizer: Tokenizer):
+    def __init__(self, config: SystemConfig, model: Transformer, tokenizer: Tokenizer):
+        self.config = config
         self.model = model
         self.tokenizer = tokenizer
         self.formatter = ChatFormat(tokenizer)
@@ -241,6 +246,87 @@ class Llama:
             out_tokens.append(toks)
             out_logprobs.append(probs)
         return (out_tokens, out_logprobs if logprobs else None)
+
+    def init_gpu_cache(self):
+        attn_wrapper = BaseAttentionWrapper(self.model.params)
+        attn_wrapper.init_gpu_cache2(
+            self.config.cache_config.block_num, 
+            self.config.cache_config.block_size
+        )
+        self._attn_wrapper = attn_wrapper
+
+        self.seq_manager = WorkerSequenceManager(
+            self.config
+        )
+
+
+    def execute_model(self, step_inputs: StepInputs)-> SamplerOutputs:
+        
+        for new_seq in step_inputs.new_seqs:
+            self.seq_manager.add_seq(new_seq)
+
+        _, seq_matadata_list = self.seq_manager.on_schedule(step_inputs.scheduler_outputs)
+
+        self._attn_wrapper.begin_forward2(seq_matadata_list)
+
+        input_tokens, input_positions, input_lens = self._prepare_inputs(seq_matadata_list)
+
+        logits = self.model.forward(input_tokens, input_positions, self._attn_wrapper)
+
+        self._attn_wrapper.end_forward()
+
+        outputs = self.sampler(seq_matadata_list, logits, input_lens)
+        
+        self.seq_manager.on_step_completed(step_inputs.scheduler_outputs, outputs)
+
+        return outputs
+
+
+    def sampler(self, seq_matadata_list, logits, step_seqlen) -> SamplerOutputs: 
+        next_token_idx = [i-1 for i in itertools.accumulate(step_seqlen)]
+        next_token_logits = logits[next_token_idx]
+
+        next_tokens = torch.argmax(next_token_logits, dim=-1)
+
+        next_tokens = next_tokens.flatten().tolist()
+        assert len(next_tokens) == len(step_seqlen), f"next_token {len(next_tokens)} must equal to len(step_seqs) {len(step_seqlen)}"
+
+        sample_outputs = []
+        for seq_metadata, new_token in zip(seq_matadata_list, next_tokens):
+            sample_outputs.append(
+                SamplerOutput(
+                    seq_metadata.seq.seq_id,
+                    new_token,
+                )
+            )
+        return sample_outputs
+
+
+    def _prepare_inputs(self, 
+        seq_metadata_list: List[SequenceMetadata]
+    ):
+        step_tokens = []
+        step_seqs: List[Sequence] = []
+        step_positions = []
+        step_seqlen = []
+        for seq_metadata in seq_metadata_list:
+            seq = seq_metadata.seq
+
+            step_seqs.append(seq)
+            if not seq.prompt_processing_finished:
+                step_tokens.extend(seq.prompt_token_ids)
+                seq_positions = list(range(len(seq.prompt_token_ids)))
+                step_seqlen.append(len(seq.prompt_token_ids))
+            else:
+                step_tokens.append(seq.output_token_ids[-1])
+                seq_positions = [len(seq.get_token_ids())-1]
+                step_seqlen.append(1)
+            step_positions.extend(seq_positions)
+
+        step_tokens = torch.tensor(step_tokens, dtype=torch.int32, device='cuda')
+        step_positions = torch.tensor(step_positions, dtype=torch.int32, device='cuda')
+        return (step_tokens, step_positions, step_seqlen)
+
 
     @torch.inference_mode()
     def generate_with_attn_wrapper(

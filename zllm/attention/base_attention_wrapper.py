@@ -14,7 +14,7 @@ import flashinfer
 
 
 from zllm.config.config import ModelArgs, CacheConfig
-from zllm.datatypes.sequence import Sequence
+from zllm.core.datatypes.sequence import Sequence, SequenceMetadata
 
 
 class Attention(nn.Module):
@@ -126,6 +126,25 @@ class BaseAttentionWrapper(Attention):
         self.block_tables = torch.tensor(block_tables, device=self.kv_device, dtype=torch.int32)
         self.cached_seq_len = torch.tensor([0]*bs, device=self.kv_device, dtype=torch.int32)
 
+    def init_gpu_cache2(self,
+                       num_gpu_blocks: int,
+                       block_size: int = 256,
+                       ) -> None:
+
+        self.num_gpu_blocks = num_gpu_blocks
+        self.block_size = block_size
+        self.kv_dtype = self.wk.weight.dtype
+        self.kv_device = self.wk.weight.device
+        self.n_layers = self.model_config.n_layers
+
+        self.device = self.kv_device
+
+        self.layered_kv_cahce = []
+        for _ in range(self.n_layers):
+            kv_cache = self.get_cache_block(
+                self.num_gpu_blocks, dtype=self.kv_dtype, device=self.kv_device,
+            )
+            self.layered_kv_cahce.append(kv_cache)
 
     def get_cache_block(self, num_blocks: int, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         return (torch.randn(
@@ -222,6 +241,95 @@ class BaseAttentionWrapper(Attention):
             self.block_size,
             causal=True
         )
+
+    def begin_forward2(self, seq_list: List[SequenceMetadata]):
+        # prepare qo_indptr for example [0, 33, 44, 55, 66, 77, 88, 100]
+        # paged_kv_indices [ 1, 2, 3, 4, 5 ]
+        # paged_kv_indptr [ 0, 2, 5, ...] seq_1 page: 1 2; seq_2 page 3 4 5  
+        # paged_kv_last_page_len [1, 7, 14, 4, 3, 1, 16]  1 <= paged_kv_last_page_len <= page_size
+        qo_indptr = [0]        
+        paged_kv_indices = []
+        paged_kv_indptr = [0]
+        paged_kv_last_page_len = []
+
+        append_qo_indptr = [0]
+        append_kv_page_indices = []
+        append_kv_page_indptr = [0]
+        append_kv_last_page_len = []
+
+        self.block_tables = {}
+
+        for seq in seq_list:                
+            if not seq.is_prompt: # prefill phase
+                continue
+            context_len = seq.num_prompt_tokens         
+
+            last_page_len = context_len % self.block_size or self.block_size
+
+            qo_indptr.append(qo_indptr[-1]+context_len)
+            kv_page_start = 0
+            kv_page_num = (context_len + self.block_size -1) // self.block_size
+            paged_kv_indices.extend(seq.block_table[kv_page_start:kv_page_num])
+            paged_kv_indptr.append(paged_kv_indptr[-1]+kv_page_num)
+            paged_kv_last_page_len.append(last_page_len)
+
+            append_qo_indptr.append(append_qo_indptr[-1]+context_len)
+            append_kv_page_start = 0
+            append_kv_page_end = (context_len + self.block_size -1) // self.block_size
+            append_kv_page_indices.extend(seq.block_table[append_kv_page_start:append_kv_page_end])
+            append_kv_page_indptr.append(append_kv_page_indptr[-1]+append_kv_page_end-append_kv_page_start)
+            append_kv_last_page_len.append(last_page_len)
+
+            self.block_tables[seq.seq.seq_id] = seq.block_table
+
+        for seq in seq_list:
+            if seq.is_prompt: # decode phase
+                continue
+            context_len = len(seq.seq.get_token_ids())
+            last_page_len = context_len%self.block_size or self.block_size
+
+            qo_indptr.append(qo_indptr[-1]+1)
+
+            kv_page_start = (context_len + self.block_size -1) // self.block_size -1
+            kv_page_num = (context_len + self.block_size -1) // self.block_size
+
+            paged_kv_indices.extend(seq.block_table[kv_page_start:kv_page_num])
+            paged_kv_indptr.append(paged_kv_indptr[-1]+1)
+            paged_kv_last_page_len.append(last_page_len)
+
+            append_qo_indptr.append(append_qo_indptr[-1]+1)
+            append_kv_page_indices.extend(seq.block_table[kv_page_start:kv_page_num])
+            append_kv_page_indptr.append(append_kv_page_indptr[-1]+1)
+            append_kv_last_page_len.append(last_page_len)
+
+            self.block_tables[seq.seq.seq_id] = seq.block_table
+        
+        qo_indptr = self.to_int_tensor(qo_indptr)
+        paged_kv_indptr = self.to_int_tensor(paged_kv_indptr)
+        paged_kv_indices = self.to_int_tensor(paged_kv_indices)
+        paged_kv_last_page_len = self.to_int_tensor(paged_kv_last_page_len)
+
+        self.append_qo_indptr_tensor = self.to_int_tensor(append_qo_indptr)
+        self.append_kv_page_indices_tensor = self.to_int_tensor(append_kv_page_indices)
+        self.append_kv_page_indptr_tensor = self.to_int_tensor(append_kv_page_indptr)
+        self.append_kv_last_page_len_tensor = self.to_int_tensor(append_kv_last_page_len)
+
+        print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {paged_kv_indptr}")
+        print(f"paged_kv_indices {paged_kv_indices} \npaged_kv_last_page_len {paged_kv_last_page_len}")
+        print(f"self.block_tables {self.block_tables}")
+
+        self.flash_attn_wrapper.plan(
+            qo_indptr,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            self.model_config.n_heads,
+            self.n_kv_heads,
+            self.model_config.dim,
+            self.block_size,
+            causal=True
+        )
+
 
     def end_forward(self):
         self.flash_attn_wrapper.end_forward()

@@ -4,6 +4,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from zllm.core.datatypes.sequence import Sequence
 from zllm.core.sequence_manager.base_sequence_manager import BaseSequenceManager
+from zllm.transformer_utils.tokenizer import detokenize_incrementally
 # from sarathi.transformers_utils.tokenizer import detokenize_incrementally
 
 
@@ -19,10 +20,7 @@ class EngineSequenceManager(BaseSequenceManager):
 
     def _decode_seq(self, seq: Sequence) -> None:
         """Decodes the new token for a sequence."""
-        # todo: 重写这段逻辑
-        (new_tokens, new_output_text, prefix_offset, read_offset) = (
-            0, " ", 0, 0
-        )
+        # todo 重写这段代码 
         # (new_tokens, new_output_text, prefix_offset, read_offset) = (
         #     detokenize_incrementally(
         #         self.tokenizer,
@@ -33,10 +31,19 @@ class EngineSequenceManager(BaseSequenceManager):
         #         skip_special_tokens=True,
         #     )
         # )
+
+        all_token_ids = seq.get_token_ids()
+        new_token_id = all_token_ids[-1]
+
+        new_output_text = self.tokenizer.decode([new_token_id])
+        (new_tokens, new_output_text, prefix_offset, read_offset) = (
+            [new_output_text], new_output_text, seq.prefix_offset+1 , seq.read_offset+1,
+        )         
         if seq.tokens is None:
             seq.tokens = new_tokens
         else:
             seq.tokens.extend(new_tokens)
+
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
         seq.output_text += new_output_text

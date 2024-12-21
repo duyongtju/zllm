@@ -6,7 +6,7 @@ import time
 import torch
 from zllm.attention.base_attention_wrapper import BaseAttentionWrapper, ModelArgs, Attention
 from zllm.worker.llama31 import precompute_freqs_cis
-from zllm.datatypes.sequence import Sequence
+from zllm.core.datatypes.sequence import Sequence
 
 
 def test_attention_wrapper():

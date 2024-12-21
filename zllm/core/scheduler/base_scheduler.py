@@ -5,6 +5,7 @@ from zllm.config import CacheConfig, ModelArgs, ParallelConfig
 from zllm.core.block_space_manager.base_block_space_manager import (
     BaseBlockSpaceManager,
 )
+from zllm.core.block_space_manager.vllm_block_space_manager import VLLMBlockSpaceManager
 from zllm.core.datatypes.scheduler_output import SchedulerOutputs
 from zllm.core.datatypes.sequence import Sequence, SequenceStatus
 from zllm.logger import init_logger
@@ -32,13 +33,13 @@ class BaseScheduler(ABC):
         # Instantiate the scheduling policy.
         # self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
-        self.block_manager = BaseBlockSpaceManager(
+        self.block_manager = VLLMBlockSpaceManager(
             block_size=cache_config.block_size,
             num_gpu_blocks=cache_config.block_num,
             max_model_len=model_config.max_seq_len,
             watermark=0,
         )
-        self.prompt_limit = model_config.max_model_len
+        self.prompt_limit = model_config.max_seq_len
 
         # number of running batches should be less than or equal to the number of pipeline stages
         self.num_running_batches = 0

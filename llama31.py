@@ -28,6 +28,8 @@ import torch.nn.functional as F
 import numpy as np
 
 from tokenizer import Tokenizer
+from zllm.core.datatypes.sequence import SamplerOutputs
+from zllm.core.datatypes.step_inputs import StepInputs
 
 # -----------------------------------------------------------------------------
 # ModelArgs
@@ -546,6 +548,12 @@ class Llama:
         # decode the completions back to strings
         completions = [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
         return completions
+    
+    def execute_model(
+            intputs: StepInputs,
+    )-> SamplerOutputs:
+
+        return 
 
 def sample_top_p(probs, p, generator):
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
