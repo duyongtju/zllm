@@ -9,8 +9,9 @@
 
 - **TP inference**: 利用 fairscale 通过 Tensor Parallelism (TP) 多卡推理，通过修改 official llama code，引入自定义的 load_weights 方法，从而在不同的卡上加载不同的权重。
 - **flashinfer**: 实现了基于flash attention的推理，引入 flashinfer 库，实现了高效的注意力计算。可以在 examples/attention 目录下找到相关示例代码。
-- **block_manager**: 实现了基于block的内存管理，通过将模型权重分割成多个块（blocks），并在推理过程中动态地加载和卸载这些块。
-- **scheduler**: 实现了基于block的调度器，scheduler 内部维护 waitting、running 队列，目前的调度策略还比较简单，在一个调度周期内，会将 waitting 队里和 running 队里中的所有请求取出，进行推理，所以在一个调度周期内会同时 prefill 和 decode。后续有优化，支持更丰富的调度策略。
+- **continuous batch**
+  - block_manager: 实现了基于block的内存管理，通过将模型权重分割成多个块（blocks），并在推理过程中动态地加载和卸载这些块。
+  - scheduler: 实现了基于block的调度器，scheduler 内部维护 waitting、running 队列，目前的调度策略还比较简单，在一个调度周期内，会将 waitting 队里和 running 队里中的所有请求取出，进行推理，所以在一个调度周期内会同时 prefill 和 decode。后续有优化，支持更丰富的调度策略。
 
 **未来计划**
 
