@@ -63,20 +63,15 @@ These are just a few of the many attractions that Paris has to offer. With so mu
             {"role": "user", "content": "I am going to Paris, what should I see?"},
         ],
         [
-            {
-                "role": "system",
-                "content": "Always answer with emojis",
-            },
+            {"role": "system", "content": "Always answer with emojis"},
             {"role": "user", "content": "How to go from Beijing to NY?"},
         ],
     ]
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    chats = tokenizer.apply_chat_template(dialogs, tokenize=False)
+    chats = tokenizer.apply_chat_template(dialogs, tokenize=False, add_generation_prompt=True)
     
-    sampling_params = SamplingParams(temperature=0.0,
-                                    stop=['<|end_of_text|>', '<|eot_id|>'],
-                                    max_tokens=50)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=50)
     
 
     results = generate(engine, chats, sampling_params)
