@@ -5,7 +5,10 @@ import json
 from multiprocessing import Queue
 from pathlib import Path
 import time
-from typing import List, Optional
+from typing import List, Optional, Union
+
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+
 
 from llama.generation import Llama
 from llama.generation import set_up
@@ -43,7 +46,7 @@ class BaseLLMEngine:
         )
 
         self.worker = worker
-        self.tokenizer = worker.tokenizer
+        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = worker.tokenizer
 
         self.seq_manager = EngineSequenceManager(
             self.tokenizer, None,
@@ -92,11 +95,12 @@ class BaseLLMEngine:
 
         if prompt_token_ids is None:
             assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(prompt, bos=True, eos=False)
+            # prompt_token_ids = self.tokenizer.encode(prompt, bos=True, eos=False)
+            prompt_token_ids = self.tokenizer.encode(prompt)
 
         # Create the sequences.
         block_size = self.config.cache_config.block_size
-        eos_token_id = self.tokenizer.eos_id
+        eos_token_id = self.tokenizer.eos_token_id
 
         seq = Sequence(
             seq_id,

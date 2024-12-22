@@ -28,7 +28,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
-from tokenizer import Tokenizer
+from llama3.llama.tokenizer import Tokenizer
 
 # -----------------------------------------------------------------------------
 # ModelArgs

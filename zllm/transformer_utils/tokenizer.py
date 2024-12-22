@@ -1,13 +1,60 @@
-
-
 from typing import List, Optional, Tuple, Union
+
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from zllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
+def get_tokenizer(
+    tokenizer_name: str,
+    *args,
+    tokenizer_mode: str = "auto",
+    trust_remote_code: bool = False,
+    **kwargs,
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Gets a tokenizer for the given model name via Huggingface."""
+    if tokenizer_mode == "slow":
+        if kwargs.get("use_fast", False):
+            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
+        kwargs["use_fast"] = False
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name, *args, trust_remote_code=trust_remote_code, **kwargs
+        )
+    except TypeError as e:
+        # The LLaMA tokenizer causes a protobuf error in some environments.
+        err_msg = "Failed to load the tokenizer."
+        raise RuntimeError(err_msg) from e
+    except ValueError as e:
+        # If the error pertains to the tokenizer class not existing or not
+        # currently being imported, suggest using the --trust-remote-code flag.
+        if not trust_remote_code and (
+            "does not exist or is not currently imported." in str(e)
+            or "requires you to execute the tokenizer file" in str(e)
+        ):
+            err_msg = (
+                "Failed to load the tokenizer. If the tokenizer is a custom "
+                "tokenizer not yet available in the HuggingFace transformers "
+                "library, consider setting `trust_remote_code=True` in LLM "
+                "or using the `--trust-remote-code` flag in the CLI."
+            )
+            raise RuntimeError(err_msg) from e
+        else:
+            raise e
+
+    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead."
+        )
+    return tokenizer
+
+
 def _convert_tokens_to_string_with_added_encoders(
-    tokenizer,
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     output_tokens: List[str],
     skip_special_tokens: bool,
 ) -> str:
@@ -36,8 +83,11 @@ def _convert_tokens_to_string_with_added_encoders(
     return " ".join(sub_texts)
 
 
+# Based on
+# https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
+# under Apache 2.0 license
 def detokenize_incrementally(
-    tokenizer,
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     all_input_ids: List[int],
     prev_tokens: Optional[List[str]],
     prefix_offset: int = 0,
@@ -54,7 +104,7 @@ def detokenize_incrementally(
             )
         except ValueError as e:
             new_tokens = ["[UNK]"] * 6
-            # logger.warning(f"Warning: {e}")
+            logger.warning(f"Warning: {e}")
 
         output_tokens = new_tokens
         # 5 is an arbitrary value that should work for all

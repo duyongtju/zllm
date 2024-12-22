@@ -1,6 +1,10 @@
+import copy
 import json
 from pathlib import Path
 from typing import List
+
+from transformers import AutoTokenizer
+
 from llama.tokenizer import ChatFormat, Dialog, Tokenizer
 from zllm.config.config import CacheConfig, ModelArgs, ParallelConfig, SystemConfig
 from zllm.core.datatypes.request_output import RequestOutput
@@ -11,8 +15,8 @@ from zllm.engine.base_llm_engine import BaseLLMEngine
 def main():
 
     ckpt_dir = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/original/'
-    tokenizer_path = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/original/tokenizer.model'
-
+    tokenizer_path = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/'
+    
     with open(Path(ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
@@ -21,7 +25,7 @@ def main():
     )
     cache_config = CacheConfig(
         block_num=200,
-        block_size=512,
+        block_size=256,
     )
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
@@ -36,55 +40,6 @@ def main():
 
     engine = BaseLLMEngine(config, ckpt_dir, tokenizer_path)
 
-
-    # example_prompt = "Who is the president of the United States?"
-    sampling_params = SamplingParams(temperature=0.0)
-    
-    tokenizer = Tokenizer(model_path=tokenizer_path)
-    prompts, prompt_tokens = generate_prompts(tokenizer)
-
-    inputs = [(p, t) for (p, t) in zip(prompts, prompt_tokens)]
-    request_id = 0
-
-    # add the request to the engine
-    prompt, prompt_id = inputs.pop()
-    engine.add_request(
-        prompt=prompt,
-        sampling_params=sampling_params,
-        prompt_token_ids=prompt_id,
-        seq_id=str(request_id),
-    )
-    
-    step_counter = 0
-    while engine.has_unfinished_requests():
-        if inputs:
-            request_id +=1 
-            prompt, prompt_id = inputs.pop()
-            engine.add_request(
-                prompt=prompt,
-                sampling_params=sampling_params,
-                prompt_token_ids=prompt_id,
-                seq_id=str(request_id),
-            )
-
-        step_counter += 1
-        request_outputs: List[RequestOutput] = engine.step()
-
-        for request_output in request_outputs:
-            print("="*20)
-            print(f"seq_id {request_output.seq_id}")
-            print(request_output.prompt)
-            print(request_output.text)
-            print("\n\n")
-
-        if step_counter > 20:
-            break
-    # for request_output in request_outputs:
-    #     if request_output.finished:
-    #         print(request_output)
-
-
-def generate_prompts(tokenizer):
 
     dialogs: List[Dialog] = [
         [{"role": "user", "content": "what is the recipe of mayonnaise?"}],
@@ -116,16 +71,54 @@ These are just a few of the many attractions that Paris has to offer. With so mu
         ],
     ]
 
-    formatter = ChatFormat(tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    chats = tokenizer.apply_chat_template(dialogs, tokenize=False)
+    
+    sampling_params = SamplingParams(temperature=0.0,
+                                    stop=['<|end_of_text|>', '<|eot_id|>'],
+                                    max_tokens=50)
+    
 
-    prompt_tokens = [
-        formatter.encode_dialog_prompt(dialog) for dialog in dialogs
-    ]
-    prompts = [
-        tokenizer.decode(prompt_token) for prompt_token in prompt_tokens
-    ]
+    results = generate(engine, chats, sampling_params)
 
-    return prompts, prompt_tokens
+    for dialog, result in zip(dialogs, results):
+        for msg in dialog:
+            print(f"{msg['role'].capitalize()}: {msg['content']}\n")
+        print(
+            f"Assistant: {result.text}"
+        )
+        print("\n==================================\n")
+    
 
+
+def generate(engine, inputs, sampling_params):
+    # example_prompt = "Who is the president of the United States?"
+
+    outputs: List[RequestOutput] = [None]*len(inputs)
+    
+    request_id = -1
+    while engine.has_unfinished_requests() or inputs:
+        if inputs:
+            request_id +=1 
+            prompt = inputs.pop(0)
+            engine.add_request(
+                prompt=prompt,
+                sampling_params=sampling_params,
+                seq_id=str(request_id),
+            )
+
+        request_outputs: List[RequestOutput] = engine.step()
+
+        for output in request_outputs:
+            if output.finished: 
+                idx = int(output.seq_id)
+                outputs[idx] = output
+
+    for output in request_outputs:
+        idx = int(output.seq_id)
+        outputs[idx] = output
+   
+    return outputs
+    
 if __name__ == "__main__":
     main()

@@ -17,6 +17,7 @@ from fairscale.nn.model_parallel.initialize import (
     initialize_model_parallel,
     model_parallel_is_initialized,
 )
+from transformers import AutoTokenizer
 
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import ChatFormat, Dialog, Message, Tokenizer
@@ -85,7 +86,7 @@ class Llama:
         """
         assert 1 <= max_seq_len <= 8192, f"max_seq_len must be between 1 and 8192, got {max_seq_len}."
         assert os.path.isdir(ckpt_dir), f"Checkpoint directory '{ckpt_dir}' does not exist."
-        assert os.path.isfile(tokenizer_path), f"Tokenizer file '{tokenizer_path}' does not exist."
+        # assert os.path.isfile(tokenizer_path), f"Tokenizer file '{tokenizer_path}' does not exist."
         
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group("nccl")
@@ -119,8 +120,9 @@ class Llama:
             max_batch_size=max_batch_size,
             **params,
         )
-        tokenizer = Tokenizer(model_path=tokenizer_path)
-        assert model_args.vocab_size == tokenizer.n_words
+        # tokenizer = Tokenizer(model_path=tokenizer_path)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        # assert model_args.vocab_size == tokenizer.n_words
         if torch.cuda.is_bf16_supported():
             torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
         else:
