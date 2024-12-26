@@ -32,3 +32,6 @@ __pycache__/
 # AUTHORS and ChangeLog will be generated while packaging
 /AUTHORS
 /ChangeLog
+
+/Megatron-LM
+/sarathi

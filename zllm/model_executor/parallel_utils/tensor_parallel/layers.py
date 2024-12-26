@@ -11,9 +11,9 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
-from sarathi.logger import init_logger
-from sarathi.metrics.cuda_timer import CudaTimer
-from sarathi.model_executor.parallel_utils.parallel_state import (
+from zllm.logger import init_logger
+from zllm.metrics.cuda_timer import CudaTimer
+from zllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
