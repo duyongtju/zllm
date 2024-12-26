@@ -1,8 +1,8 @@
 import torch
 
-from sarathi.metrics.constants import OperationMetrics
-from sarathi.metrics.cuda_timer import CudaTimer
-from sarathi.model_executor.parallel_utils.parallel_state import (
+from zllm.metrics.constants import OperationMetrics
+from zllm.metrics.cuda_timer import CudaTimer
+from zllm.model_executor.parallel_utils.parallel_state import (
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_next_rank,
     get_pipeline_model_parallel_prev_rank,

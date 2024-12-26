@@ -5,41 +5,38 @@ from typing import List
 
 from transformers import AutoTokenizer
 
-from llama.tokenizer import ChatFormat, Dialog, Tokenizer
-from zllm.config.config import CacheConfig, ModelArgs, ParallelConfig, SystemConfig
+from zllm.config.config import CacheConfig, ModelConfig, ParallelConfig, SystemConfig, VllmSchedulerConfig
 from zllm.core.datatypes.request_output import RequestOutput
 from zllm.core.datatypes.sampling_params import SamplingParams
 from zllm.engine.base_llm_engine import BaseLLMEngine
 
+ckpt_dir = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct/'
+model_config: ModelConfig = ModelConfig(
+    model=ckpt_dir,
+    trust_remote_code=True,
+    dtype='bfloat16'
+)
+scheduler_config: VllmSchedulerConfig = VllmSchedulerConfig(
+    max_num_seqs=16,
+    max_batched_tokens=8*1024,
+)
+cache_config = CacheConfig(
+    num_gpu_blocks=200,
+    block_size=256,
+)
+parallel_config = ParallelConfig(
+    pipeline_parallel_size=1,
+    tensor_parallel_size=1,    
+)
+config = SystemConfig(
+    model_config=model_config,
+    cache_config=cache_config,
+    parallel_config=parallel_config,
+)
 
 def main():
 
-    ckpt_dir = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/original/'
-    # tokenizer_path = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/original/tokenizer.model'
-    tokenizer_path = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/'
-    
-    with open(Path(ckpt_dir) / "params.json", "r") as f:
-        params = json.loads(f.read())
-
-    model_args: ModelArgs = ModelArgs(
-        **params,
-    )
-    cache_config = CacheConfig(
-        block_num=200,
-        block_size=256,
-    )
-    parallel_config = ParallelConfig(
-        pipeline_parallel_size=1,
-        tensor_parallel_size=1,    
-    )
-
-    config = SystemConfig(
-        model_config=model_args,
-        cache_config=cache_config,
-        parallel_config=parallel_config,
-    )
-
-    engine = BaseLLMEngine(config, ckpt_dir, tokenizer_path)
+    engine = BaseLLMEngine(config)
 
     prompts: List[str] = [
         # For these prompts, the expected answer is the natural continuation of the prompt

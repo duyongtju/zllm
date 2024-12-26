@@ -30,11 +30,14 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-# from sarathi.model_executor.attention.base_attention_wrapper import BaseAttentionWrapper
-from sarathi.model_executor.layers.activation import SiluAndMul
-from sarathi.model_executor.layers.layernorm import RMSNorm
-from sarathi.model_executor.layers.rotary_embedding import get_rope
-from sarathi.model_executor.parallel_utils.parallel_state import (
+
+from zllm.metrics.constants import OperationMetrics
+from zllm.metrics.cuda_timer import CudaTimer
+from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
+from zllm.model_executor.layers.activation import SiluAndMul
+from zllm.model_executor.layers.layernorm import RMSNorm
+from zllm.model_executor.layers.rotary_embedding import get_rope
+from zllm.model_executor.parallel_utils.parallel_state import (
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
     get_tensor_model_parallel_rank,
@@ -149,6 +152,7 @@ class LlamaAttention(nn.Module):
             is_neox_style=True,
             rope_scaling=rope_scaling,
         )
+        self._attn_rope_timer = CudaTimer(OperationMetrics.ATTN_ROPE)
 
     def forward(
         self,

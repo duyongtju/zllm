@@ -13,7 +13,7 @@ from flash_attn import flash_attn_with_kvcache
 import flashinfer
 
 
-from zllm.config.config import ModelArgs, CacheConfig
+from zllm.config.config import ModelArgs, CacheConfig, ModelConfig, ParallelConfig
 from zllm.core.datatypes.sequence import Sequence, SequenceMetadata
 
 
@@ -79,14 +79,28 @@ class Attention(nn.Module):
         return proj
 
 
-class BaseAttentionWrapper(Attention):
-    def __init__(self, args: ModelArgs):
-        super().__init__(args)
-        self.model_config: ModelArgs = args
-        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        self.kv_cache = None
-        # self.cache = None
+class BaseAttentionWrapper:
+    def __init__(
+        self, 
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parall_config: ParallelConfig,
+        device: torch.device,
+    ):
+        # super().__init__(args)
+        self.model_config: ModelConfig = model_config
+        self.cache_config: CacheConfig = cache_config
 
+        self.device = device, 
+        self.num_q_heads = model_config.get_num_q_heads(parall_config)
+        self.num_kv_heads = model_config.get_num_kv_heads(parall_config)
+        self.head_dim = model_config.get_head_size()
+        self.dtype = model_config.dtype
+        self.block_size = cache_config.block_size
+        self.num_layers = model_config.get_num_layers(parall_config)
+        self.num_gpu_blocks: int = cache_config.num_gpu_blocks
+
+        self.kv_cache = None
         self.flash_attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             torch.empty(128*1024*1024, dtype=torch.uint8, device="cuda")
         )
@@ -95,69 +109,44 @@ class BaseAttentionWrapper(Attention):
 
         # self.attn = Attention(self.model_config)
         
-    def init_gpu_cache(self, bs: int, 
-                       max_seq_len: int, 
-                       num_gpu_blocks: int,
-                       block_size: int = 256,
-                       ) -> None:
+    def init_gpu_cache(
+        self, 
+        num_gpu_blocks: int,
+    ) -> None:
 
         self.num_gpu_blocks = num_gpu_blocks
-        self.block_size = block_size
-        self.kv_dtype = self.wk.weight.dtype
-        self.kv_device = self.wk.weight.device
-        self.n_layers = self.model_config.n_layers
-
-        self.device = self.kv_device
 
         self.layered_kv_cahce = []
-        for i in range(self.n_layers):
+        for _ in range(self.num_layers):
             kv_cache = self.get_cache_block(
-                self.num_gpu_blocks, dtype=self.kv_dtype, device=self.kv_device,
-            )
-            self.layered_kv_cahce.append(kv_cache)
-
-        num_blocks_per_seq = (max_seq_len + self.block_size - 1)//self.block_size
-        blocks = random.sample(range(0, num_gpu_blocks), num_blocks_per_seq*bs)
-        block_tables = []
-        for i in range(bs):
-            seq_block_start = i*num_blocks_per_seq
-            seq_block_end = (i+1)*num_blocks_per_seq
-            block_tables.append(blocks[seq_block_start:seq_block_end])
-        self.block_tables = torch.tensor(block_tables, device=self.kv_device, dtype=torch.int32)
-        self.cached_seq_len = torch.tensor([0]*bs, device=self.kv_device, dtype=torch.int32)
-
-    def init_gpu_cache2(self,
-                       num_gpu_blocks: int,
-                       block_size: int = 256,
-                       ) -> None:
-
-        self.num_gpu_blocks = num_gpu_blocks
-        self.block_size = block_size
-        self.kv_dtype = self.wk.weight.dtype
-        self.kv_device = self.wk.weight.device
-        self.n_layers = self.model_config.n_layers
-
-        self.device = self.kv_device
-
-        self.layered_kv_cahce = []
-        for _ in range(self.n_layers):
-            kv_cache = self.get_cache_block(
-                self.num_gpu_blocks, dtype=self.kv_dtype, device=self.kv_device,
+                self.num_gpu_blocks, dtype=self.dtype, device="cuda",
             )
             self.layered_kv_cahce.append(kv_cache)
 
     def get_cache_block(self, num_blocks: int, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        return (torch.randn(
+        print((
             num_blocks,
             self.block_size,
-            self.n_kv_heads,
+            self.num_kv_heads,
             self.head_dim,
-            **kwargs,
-        ), torch.randn(num_blocks,
-            self.block_size,
-            self.n_kv_heads,
-            self.head_dim,
-            **kwargs,))
+            kwargs,
+        ))
+        return (
+            torch.randn(
+                num_blocks, 
+                self.block_size, 
+                self.num_kv_heads, 
+                self.head_dim,
+                **kwargs
+            ), 
+            torch.randn(
+                num_blocks, 
+                self.block_size, 
+                self.num_kv_heads, 
+                self.head_dim,
+                **kwargs
+            )
+        )
 
     def begin_forward(self, seq_list: List[Sequence]):
         # prepare qo_indptr for example [0, 33, 44, 55, 66, 77, 88, 100]
@@ -236,7 +225,7 @@ class BaseAttentionWrapper(Attention):
             paged_kv_indices,
             paged_kv_last_page_len,
             self.model_config.n_heads,
-            self.n_kv_heads,
+            self.num_kv_heads,
             self.model_config.dim,
             self.block_size,
             causal=True
@@ -323,9 +312,9 @@ class BaseAttentionWrapper(Attention):
             paged_kv_indptr,
             paged_kv_indices,
             paged_kv_last_page_len,
-            self.model_config.n_heads,
-            self.n_kv_heads,
-            self.model_config.dim,
+            self.num_q_heads,
+            self.num_kv_heads,
+            self.head_dim,
             self.block_size,
             causal=True
         )
@@ -334,7 +323,7 @@ class BaseAttentionWrapper(Attention):
     def end_forward(self):
         self.flash_attn_wrapper.end_forward()
 
-    def forward2(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -344,9 +333,9 @@ class BaseAttentionWrapper(Attention):
         layer_id: Optional[int] = None,
     ) -> torch.Tensor:
         
-        query = query.contiguous().reshape(-1, self.model_config.n_heads, self.head_dim)
-        key = key.contiguous().reshape(-1, self.model_config.n_kv_heads, self.head_dim)
-        value = value.contiguous().reshape(-1, self.model_config.n_kv_heads, self.head_dim)
+        query = query.contiguous().reshape(-1, self.num_q_heads, self.head_dim)
+        key = key.contiguous().reshape(-1, self.num_kv_heads, self.head_dim)
+        value = value.contiguous().reshape(-1, self.num_kv_heads, self.head_dim)
         
         if layer_cache_idx == 0:
             print(f"layer {layer_cache_idx} \n"+"="*20)
@@ -377,6 +366,7 @@ class BaseAttentionWrapper(Attention):
             pos_encoding_mode="NONE",
             sm_scale=softmax_scale,
         )
+        output = output.reshape(-1, self.num_q_heads * self.head_dim)
         return output
 
 
@@ -384,7 +374,7 @@ class BaseAttentionWrapper(Attention):
         return torch.tensor(data, dtype=torch.int32, device="cuda")
 
 
-    def forward(
+    def forward_llama(
         self,
         x: torch.Tensor,
         start_pos: int,

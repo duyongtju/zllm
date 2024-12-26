@@ -13,6 +13,9 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from llama.generation import Llama
 from llama.generation import set_up
 
+from zllm.core.datatypes.comm_info import CommInfo
+from zllm.core.scheduler.scheduler_registry import SchedulerRegistry
+from zllm.utils import Counter
 from zllm.config.config import SystemConfig, CacheConfig, ParallelConfig
 from zllm.core.datatypes.request_output import RequestOutput
 from zllm.core.datatypes.sampling_params import SamplingParams
@@ -22,46 +25,61 @@ from zllm.core.datatypes.step_inputs import StepInputs
 from zllm.core.scheduler.sample_scheduler import SampleScheduler
 from zllm.core.sequence_manager.base_sequence_manager import BaseSequenceManager
 from zllm.core.sequence_manager.engine_sequence_manager import EngineSequenceManager
+from zllm.transformer_utils.tokenizer import get_tokenizer
 from zllm.utils.threading_utils import synchronized
-from zllm.worker.llama31 import ModelArgs
+from zllm.worker.base_worker import BaseWroker
 
 
 class BaseLLMEngine:
 
-    def __init__(self,
-                 config: SystemConfig,
-                 ckpt_dir: str,
-                 tokenizer_path: str,
+    def __init__(
+        self,
+        config: SystemConfig,
     ) -> None:
         self.config = config
 
-        # todo: 抽象 worker 层，增加 init_work 方法
-        set_up(0, 1)
-        worker = Llama.build(
-            config,
-            ckpt_dir=ckpt_dir,
-            tokenizer_path=tokenizer_path,
-            max_seq_len=config.model_config.max_seq_len,
-            max_batch_size=config.model_config.max_batch_size,
-        )
+        # # todo: 抽象 worker 层，增加 init_work 方法
+        # set_up(0, 1)
+        # worker = Llama.build(
+        #     config,
+        #     ckpt_dir=ckpt_dir,
+        #     tokenizer_path=tokenizer_path,
+        #     max_seq_len=config.model_config.max_seq_len,
+        #     max_batch_size=config.model_config.max_batch_size,
+        # )
 
-        self.worker = worker
-        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = worker.tokenizer
+        # self.worker = worker
+        # self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = worker.tokenizer
+
+        self.tokenizer = get_tokenizer(
+            config.model_config.model,
+            trust_remote_code=config.model_config.trust_remote_code,
+            revision=config.model_config.revision,
+        )
 
         self.seq_manager = EngineSequenceManager(
             self.tokenizer, None,
         )
+        self.seq_counter = Counter()
         
-        self.scheduler = SampleScheduler(
-            model_config=config.model_config,
-            cache_config=config.cache_config,
-            parallel_config=config.parallel_config,
+        self.scheduler = SchedulerRegistry.get(
+            config.scheduler_config.get_type(),
+            config.model_config,
+            config.scheduler_config,
+            config.cache_config,
+            config.parallel_config,
         )
 
         self.new_seqs: List[Sequence] = []
 
-        self.worker.init_gpu_cache()
+        driver_ip = '127.0.0.1'
+        self.comm_info = CommInfo(driver_ip)
+        self.worker = BaseWroker(config, 0, 0, self.comm_info)
 
+        self.worker.init_model()
+        self.worker.init_cache_engine(
+            self.config.cache_config
+        )
 
     def add_request(
         self,
@@ -169,7 +187,7 @@ class BaseLLMEngine:
         ignored_seqs, seq_metadata_list = self.seq_manager.on_schedule(scheduler_outputs)
 
         # todo: 改写这段逻辑
-        sampler_outputs = self.worker.execute_model(StepInputs(
+        sampler_outputs = self.worker.sync_execute(StepInputs(
             scheduler_outputs, self._get_new_seqs()
         ))
 

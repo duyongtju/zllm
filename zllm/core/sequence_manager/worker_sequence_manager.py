@@ -21,8 +21,8 @@ class WorkerSequenceManager(BaseSequenceManager):
         # sending block table every time to the worker
         self.block_manager = VLLMBlockSpaceManager(
             block_size=config.cache_config.block_size,
-            num_gpu_blocks=config.cache_config.block_num,
-            max_model_len=config.model_config.max_seq_len,
+            num_gpu_blocks=config.cache_config.num_gpu_blocks,
+            max_model_len=config.model_config.max_model_len,
         )
 
     def _free_seq(self, seq_id: str) -> None:

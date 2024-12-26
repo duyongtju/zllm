@@ -12,7 +12,7 @@ from torch import _C
 from torch.cuda import _lazy_call
 from torch.cuda import device as device_ctx_manager
 
-from sarathi.model_executor.parallel_utils.parallel_state import (
+from zllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 
