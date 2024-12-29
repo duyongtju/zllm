@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
 
-from zllm.config import CacheConfig, ModelArgs, ParallelConfig
+from zllm.config import CacheConfig, ParallelConfig
 from zllm.config.config import BaseSchedulerConfig, ModelConfig
 from zllm.core.block_space_manager.base_block_space_manager import (
     BaseBlockSpaceManager,

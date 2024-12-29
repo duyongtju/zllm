@@ -69,7 +69,7 @@ These are just a few of the many attractions that Paris has to offer. With so mu
     tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
     chats = tokenizer.apply_chat_template(dialogs, tokenize=False, add_generation_prompt=True)
     
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=500)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=50)
     
 
     results = generate(engine, chats, sampling_params)

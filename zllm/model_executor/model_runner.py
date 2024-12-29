@@ -1,7 +1,8 @@
-
+"""  model runner """
 
 from typing import List, Optional, Tuple
 import torch
+
 from zllm.attention.base_attention_wrapper import BaseAttentionWrapper
 from zllm.config.config import SystemConfig
 from zllm.core.datatypes.sequence import SequenceMetadata
@@ -108,7 +109,7 @@ class ModelRunner:
         
         input_tokens, input_positions = self._prepare_inputs(seq_metadata_list)
 
-        self.attention_backend_wrapper.begin_forward2(seq_metadata_list)
+        self.attention_backend_wrapper.begin_forward(seq_metadata_list)
 
         output = self.model(
             hidden_states=input_tokens,

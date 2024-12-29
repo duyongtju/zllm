@@ -4,21 +4,25 @@ import os
 from pathlib import Path
 import random
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+
 from zllm.core.datatypes.sequence import SamplerOutputs
 from zllm.core.datatypes.step_inputs import StepInputs
 from zllm.model_executor.parallel_utils.tensor_parallel.random import model_parallel_cuda_manual_seed
-from zllm.config.config import CacheConfig, ModelArgs, ParallelConfig, SystemConfig
+from zllm.config.config import CacheConfig, ParallelConfig, SystemConfig
 from zllm.core.datatypes.scheduler_output import SchedulerOutputs
-from zllm.core.datatypes.sequence import Sequence
 from zllm.core.sequence_manager.worker_sequence_manager import WorkerSequenceManager
 from zllm.model_executor.model_runner import ModelRunner
-from zllm.model_executor.parallel_utils.parallel_state import get_pipeline_model_parallel_rank, get_tensor_model_parallel_rank, initialize_model_parallel, model_parallel_is_initialized
+from zllm.model_executor.parallel_utils.parallel_state import (
+    get_pipeline_model_parallel_rank, 
+    get_tensor_model_parallel_rank, 
+    initialize_model_parallel, 
+    model_parallel_is_initialized
+)
 from zllm.utils.threading_utils import exit_on_error, synchronized
-from zllm.worker.llama31 import Llama, Transformer
 from zllm.logger import init_logger
 from zllm.core.datatypes.comm_info import CommInfo
 
@@ -26,7 +30,7 @@ logger = init_logger(__name__)
 
 seed = 7
 
-class BaseWroker:
+class BaseWorker:
     def __init__(
         self, 
         config: SystemConfig,
@@ -43,25 +47,6 @@ class BaseWroker:
         self.gpu_cache = None
 
         self.seq_manager = None     
-        
-    def get_model(self, model_config: ModelArgs, ckpt_dir: str):
-
-        assert os.path.isdir(ckpt_dir), f"{ckpt_dir} is not a valid directory"
-
-        local_rank = 0
-        torch.cuda.set_device(local_rank)
-        torch.manual_seed(seed)
-
-        start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-        assert len(checkpoints) == 1, f"{ckpt_dir} should contain exactly one checkpoint"
-
-        if torch.cuda.is_bf16_supported():
-            torch.set_default_tensor_type(torch.bfloat16)
-        else:
-            torch.set_default_tensor_type(torch.float16)
-        model = Transformer(model_config)
-        model.load_state_dict(torch.load(checkpoints[0], ))
 
     @torch.inference_mode()
     @synchronized
@@ -124,6 +109,10 @@ class BaseWroker:
         self.seq_manager = WorkerSequenceManager(
             self.config,   
         )
+
+    @synchronized
+    def get_model_parallel_ranks(self) -> Tuple[int, int]:
+        return self.tensor_model_parallel_rank, self.pipeline_model_parallel_rank
 
     def on_step_completed(
         self, scheduler_outputs: SchedulerOutputs, sampler_outputs: SamplerOutputs

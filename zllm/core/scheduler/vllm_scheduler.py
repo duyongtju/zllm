@@ -30,7 +30,7 @@ class VLLMScheduler(BaseScheduler):
 
 
     def _schedule(self) -> SchedulerOutputs:
-                # Fix the current time.
+        # Fix the current time.
         now = time.monotonic()
 
         ignored_seq_ids: List[str] = []
@@ -111,7 +111,7 @@ class VLLMScheduler(BaseScheduler):
 
         return SchedulerOutputs(
             id=self._iteration_id,
-            ignored_seq_ids=[],
+            ignored_seq_ids=ignored_seq_ids,
             preempted_seq_ids=preempted_seq_ids,
             scheduled_seq_metadata_list=scheduled_seq_metadata_list,
         )

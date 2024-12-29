@@ -1,7 +1,7 @@
 
 from typing import List
 from zllm.core.datatypes.scheduler_output import SchedulerOutputs
-from zllm.config.config import CacheConfig, ModelArgs, ParallelConfig
+from zllm.config.config import CacheConfig, ModelConfig, ParallelConfig
 from zllm.core.datatypes.sequence import Sequence, SequenceScheduleMetadata
 from zllm.core.scheduler.base_scheduler import BaseScheduler
 
@@ -9,7 +9,7 @@ class SampleScheduler(BaseScheduler):
 
     def __init__(
             self, 
-            model_config: ModelArgs, 
+            model_config: ModelConfig, 
             cache_config: CacheConfig, 
             parallel_config: ParallelConfig,
     ) -> None:

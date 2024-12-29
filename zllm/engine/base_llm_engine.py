@@ -1,12 +1,14 @@
 
 
 import copy
+from functools import partial
 import json
 from multiprocessing import Queue
 from pathlib import Path
 import time
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import ray
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
@@ -15,7 +17,9 @@ from llama.generation import set_up
 
 from zllm.core.datatypes.comm_info import CommInfo
 from zllm.core.scheduler.scheduler_registry import SchedulerRegistry
-from zllm.utils import Counter
+from zllm.engine.ray_utils import RayWorker, initialize_cluster
+from zllm.logger import init_logger
+from zllm.utils import Counter, get_ip, unset_cuda_visible_devices
 from zllm.config.config import SystemConfig, CacheConfig, ParallelConfig
 from zllm.core.datatypes.request_output import RequestOutput
 from zllm.core.datatypes.sampling_params import SamplingParams
@@ -27,8 +31,13 @@ from zllm.core.sequence_manager.base_sequence_manager import BaseSequenceManager
 from zllm.core.sequence_manager.engine_sequence_manager import EngineSequenceManager
 from zllm.transformer_utils.tokenizer import get_tokenizer
 from zllm.utils.threading_utils import synchronized
-from zllm.worker.base_worker import BaseWroker
+from zllm.worker.base_worker import BaseWorker
 
+_MAX_WORKER_CONCURRENCY = 1
+
+ModelParallelRank = Tuple[int, int]
+
+logger = init_logger(__name__)
 
 class BaseLLMEngine:
 
@@ -61,7 +70,23 @@ class BaseLLMEngine:
             self.tokenizer, None,
         )
         self.seq_counter = Counter()
+
+        self.worker_map: Dict[ModelParallelRank, int] = {}
+
+        # Initialize the cluster.
+        initialize_cluster()
+
+        # Create the parallel GPU workers.
+        self._init_workers_ray()
+
+        # Profile the memory usage and initialize the cache.
+        self._init_cache()
+
+        # Initialize the worker map.
+        self._init_worker_map()
         
+        # self.mark_initial_memory_profiling_done()
+
         self.scheduler = SchedulerRegistry.get(
             config.scheduler_config.get_type(),
             config.model_config,
@@ -72,14 +97,136 @@ class BaseLLMEngine:
 
         self.new_seqs: List[Sequence] = []
 
-        driver_ip = '127.0.0.1'
-        self.comm_info = CommInfo(driver_ip)
-        self.worker = BaseWroker(config, 0, 0, self.comm_info)
-
-        self.worker.init_model()
-        self.worker.init_cache_engine(
-            self.config.cache_config
+    def _get_worker_impl(self):
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from zllm.worker.base_worker import (
+            BaseWorker,  # pylint: disable=import-outside-toplevel
         )
+
+        return BaseWorker
+
+    def _init_workers_ray(self, **ray_remote_kwargs):
+        resource_mapping = self.config.replica_config.get_resource_mapping(
+            self.config.parallel_config.world_size
+        )
+        logger.info(f"Starting workers with resource mapping: {resource_mapping}")
+
+        self.workers: List[RayWorker] = []
+
+        unset_cuda_visible_devices()
+        
+        driver_ip = None
+        for rank, (node_ip, _) in enumerate(resource_mapping):
+            worker_class = ray.remote(
+                num_cpus=1,
+                # num_gpus=1, # we don't use ray for managing GPUs
+                **ray_remote_kwargs,
+            )(RayWorker)
+
+            if node_ip:
+                worker_class = worker_class.options(
+                    max_concurrency=_MAX_WORKER_CONCURRENCY,
+                    resources={
+                        node_ip: 0.01,
+                    },
+                )
+            else:
+                worker_class = worker_class.options(
+                    max_concurrency=_MAX_WORKER_CONCURRENCY,
+                )
+
+            if rank == 0:
+                if node_ip:
+                    # remove node: prefix
+                    driver_ip = node_ip.split(":")[1]
+                else:
+                    driver_ip = get_ip()
+
+            worker = worker_class.remote(self.config.model_config.trust_remote_code)
+
+            self.workers.append(worker)
+
+        self.comm_info = CommInfo(driver_ip)
+
+        # Initialize torch distributed process group for the workers.
+        config = copy.deepcopy(self.config)
+        worker_impl = self._get_worker_impl()
+
+        for rank, worker in enumerate(self.workers):
+            local_rank = resource_mapping[rank][1]
+            promise = worker.init_worker.remote(
+                lambda rank=rank, local_rank=local_rank: worker_impl(
+                    config,
+                    local_rank,
+                    rank,
+                    self.comm_info,
+                )
+            )
+            ray.get(promise)
+
+        self._run_workers(
+            "init_model",
+            get_all_outputs=True,
+        )
+
+    def _init_cache(self) -> None:
+        """Profiles the memory usage and initializes the KV cache."""
+        # # Get the maximum number of blocks that can be allocated on GPU.
+        # num_gpu_blocks_across_workers = self._run_workers(
+        #     "profile_num_available_blocks",
+        #     get_all_outputs=True,
+        #     block_size=self.config.cache_config.block_size,
+        #     gpu_memory_utilization=self.config.worker_config.gpu_memory_utilization,
+        # )
+
+        # # Since we use a shared centralized controller, we take the minimum
+        # # number of blocks across all workers to make sure all the memory
+        # # operators can be applied to all workers.
+        # num_gpu_blocks = min(num_gpu_blocks_across_workers)
+        # # FIXME(woosuk): Change to debug log.
+        # logger.info(f"# GPU blocks: {num_gpu_blocks}")
+
+        # if num_gpu_blocks <= 0:
+        #     raise ValueError(
+        #         "No available memory for the cache blocks. "
+        #         "Try increasing `gpu_memory_utilization` when "
+        #         "initializing the engine."
+        #     )
+        # max_blocks_per_request = math.ceil(
+        #     self.config.model_config.max_model_len / self.config.cache_config.block_size
+        # )
+        # if num_gpu_blocks < max_blocks_per_request:
+        #     raise ValueError(
+        #         f"Not enough available memory to schedule a request will maximum allowed length {self.config.model_config.max_model_len}. "
+        #         f"Need {max_blocks_per_request}, available {num_gpu_blocks} gpu blocks. "
+        #         f"Try decreasing `max_batch_size`, `max_model_len`."
+        #     )
+        # self.config.cache_config.num_gpu_blocks = num_gpu_blocks
+
+        # Initialize the cache.
+        self._run_workers(
+            "init_cache_engine",
+            cache_config=self.config.cache_config,
+            get_all_outputs=True,
+        )
+
+    def _init_worker_map(self) -> None:
+        model_parallel_ranks = self._run_workers(
+            "get_model_parallel_ranks",
+            get_all_outputs=True,
+        )
+
+        self.worker_map = {mp_rank: i for i, mp_rank in enumerate(model_parallel_ranks)}
+
+    def sync_execute_model(self, *args, **kwargs)-> SamplerOutputs:
+        sampler_outputs = self._run_workers(
+            "sync_execute",
+            get_all_outputs=True,
+            *args,
+            **kwargs,
+        )
+        return sampler_outputs[0]
 
     def add_request(
         self,
@@ -187,7 +334,7 @@ class BaseLLMEngine:
         ignored_seqs, seq_metadata_list = self.seq_manager.on_schedule(scheduler_outputs)
 
         # todo: 改写这段逻辑
-        sampler_outputs = self.worker.sync_execute(StepInputs(
+        sampler_outputs = self.sync_execute_model(step_inputs=StepInputs(
             scheduler_outputs, self._get_new_seqs()
         ))
 
@@ -199,4 +346,62 @@ class BaseLLMEngine:
             start_time,
         )
 
+    def _run_workers(
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        ignore_output: bool = False,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        all_outputs = []
+        for worker in self.workers:
+            executor = partial(worker.execute_method.remote, method)
+
+            output = executor(*args, **kwargs)
+            all_outputs.append(output)
+
+        if ignore_output:
+            return
+
+        while True:
+            try:
+                all_outputs = ray.get(all_outputs, timeout=0)
+                break
+            except ray.exceptions.GetTimeoutError:
+                time.sleep(0)
+                continue
+
+        if get_all_outputs:
+            return all_outputs
+
+        # Make sure all workers have the same results.
+        output = all_outputs[0]
+        for other_output in all_outputs[1:]:
+            assert output == other_output
+        return output
+
+    def _run_worker(
+        self,
+        model_parallel_rank: ModelParallelRank,
+        method: str,
+        *args,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        worker = self.workers[self.worker_map[model_parallel_rank]]
+        executor = partial(worker.execute_method.remote, method)
+
+        output = executor(*args, **kwargs)
+
+        while True:
+            try:
+                output = ray.get(output, timeout=0)
+                break
+            except ray.exceptions.GetTimeoutError:
+                time.sleep(0)
+                continue
+
+        return output
 
