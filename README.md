@@ -4,30 +4,37 @@
 
 此外，在 examples 目录下包括了一些示例代码，用于演示如何使用这个框架进行大模型的推理。
 
+## 已支持 feature
 
-**已支持 feature**
-
-- **TP inference**: 利用 fairscale 通过 Tensor Parallelism (TP) 多卡推理，通过修改 official llama code，引入自定义的 load_weights 方法，从而在不同的卡上加载不同的权重。
-- **flashinfer**: 实现了基于flash attention的推理，引入 flashinfer 库，实现了高效的注意力计算。可以在 examples/attention 目录下找到相关示例代码。
 - **continuous batch**
   - block_manager: 实现了基于block的内存管理，将 kv-cache 按块进行划分，从而实现高效的内存管理。
   - scheduler: 实现了基于block的调度器，scheduler 内部维护 waitting、running 队列，目前的调度策略还比较简单，在一个调度周期内，会将 waitting 队里和 running 队里中的所有请求取出，进行推理，所以在一个调度周期内会同时 prefill 和 decode。后续优化将支持更丰富的调度策略。
+- **TP inference**
+  - 参考 Megatron 切分模型，通过 Tensor Parallelism (TP) 多卡并行推理，不支持 Pipeline 并行。
+  - 引入自定义的 load_weights 方法，从而在不同的卡上加载不同的权重。
+- **用ray实现进程管理**
+  - worker 和 engine 分离在不同的进程中，worker 负责执行推理，engine 负责调度。
+- **flash attention**: 实现了基于flash attention的推理，引入 flashinfer 库，实现了高效的注意力计算。可以在 examples/attention 目录下找到相关示例代码。
+- **从HF加载模型**: 支持加载 HF 上的模型，目前仅支持 llama3.1，未来计划支持更多模型。
 
-**未来计划**
+## 未来计划
 
-- **引入worker层**: 目前 worker 和 engine 层是在一个进程中，engine 将调度的结果交给 worker 层，后续计划将这部分逻辑分离到独立的进程中去，并在 worker 中增加 init_distributed_environment, init_model, init_model, execute_model 等方法，从而实现 worker 层和 engine 层的解耦。计划采用 ray 管理进程，zmq 作为通信层。
-- **从HF加载模型**: 目前只支持 Llama3.1 官方原始的权重，也就是 .bin 格式，计划支持加载 transformer 格式的模型和 tokenizer，因为 HF 上收集了很多模型。
+- **worker 细分不同的方法**: worker 中增加 init_distributed_environment, init_model, init_model, execute_model 等方法，从而实现 worker 层和 engine 层的解耦。
+- **引入 zmq实现engine 和 worker 通信**: zmq 作为通信层。
 - **支持更多调度策略**: 目前只支持简单的调度策略，后续计划支持更丰富的调度策略，包括设置调度预算、驱逐、抢占等。
 - **性能优化**： torch compiler, wq、wk、wv 算子融合, 引入 ROE 算子 等。
 - **benchmark**: 增加benchmark。
 - **支持更多模型**: 目前只支持 llama3.1，后续计划支持其他大语言模型。
-- **支持更多硬件**: 目前只支持基于CUDA的GPU推理，后续计划支持华为910加速卡。
+- **支持更多硬件**: 目前只支持基于CUDA的GPU推理，后续计划支持华为910b加速卡。
 - **支持多模态模型**: 目前只支持文本生成，后续计划支持图像、视频等模态的推理。
 - 其他
   - 量化
   - prefix cache
   - prompt cache
 
+## 其他问题
+
+- ray 日志管理：目前 ray 日志会打印到终端，后续计划支持将日志写入文件。
 
 
 ### let's go

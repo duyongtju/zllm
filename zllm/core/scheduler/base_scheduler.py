@@ -1,13 +1,15 @@
 from abc import ABC, abstractmethod
 from typing import List
 
-from zllm.config import CacheConfig, ModelArgs, ParallelConfig
+from zllm.config import CacheConfig, ParallelConfig
+from zllm.config.config import BaseSchedulerConfig, ModelConfig
 from zllm.core.block_space_manager.base_block_space_manager import (
     BaseBlockSpaceManager,
 )
 from zllm.core.block_space_manager.vllm_block_space_manager import VLLMBlockSpaceManager
 from zllm.core.datatypes.scheduler_output import SchedulerOutputs
 from zllm.core.datatypes.sequence import Sequence, SequenceStatus
+from zllm.core.policy import PolicyFactory
 from zllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -17,13 +19,14 @@ class BaseScheduler(ABC):
 
     def __init__(
         self,
-        model_config: ModelArgs,
+        model_config: ModelConfig,
+        scheduler_config: BaseSchedulerConfig,
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
     ) -> None:
         # self.metrics_store = MetricsStore.get_instance()
         self.model_config = model_config
-        # self.scheduler_config = scheduler_config
+        self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.parallel_config = parallel_config
 
@@ -31,15 +34,15 @@ class BaseScheduler(ABC):
         self._iteration_id = -1
 
         # Instantiate the scheduling policy.
-        # self.policy = PolicyFactory.get_policy(policy_name="fcfs")
+        self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
         self.block_manager = VLLMBlockSpaceManager(
             block_size=cache_config.block_size,
-            num_gpu_blocks=cache_config.block_num,
-            max_model_len=model_config.max_seq_len,
+            num_gpu_blocks=cache_config.num_gpu_blocks,
+            max_model_len=model_config.max_model_len,
             watermark=0,
         )
-        self.prompt_limit = model_config.max_seq_len
+        self.prompt_limit = model_config.max_model_len
 
         # number of running batches should be less than or equal to the number of pipeline stages
         self.num_running_batches = 0

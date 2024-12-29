@@ -22,7 +22,7 @@ class NewLineFormatter(logging.Formatter):
         return msg
 
 
-_root_logger = logging.getLogger("sarathi")
+_root_logger = logging.getLogger("zllm")
 _default_handler = None
 
 

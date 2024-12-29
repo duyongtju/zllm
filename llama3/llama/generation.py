@@ -252,7 +252,7 @@ class Llama:
     def init_gpu_cache(self):
         attn_wrapper = BaseAttentionWrapper(self.model.params)
         attn_wrapper.init_gpu_cache2(
-            self.config.cache_config.block_num, 
+            self.config.cache_config.num_gpu_blocks, 
             self.config.cache_config.block_size
         )
         self._attn_wrapper = attn_wrapper

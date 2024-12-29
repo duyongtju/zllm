@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 
 import torch
-from zllm.attention.base_attention_wrapper import BaseAttentionWrapper, ModelArgs, Attention
+from zllm.attention.base_attention_wrapper import BaseAttentionWrapper, ModelArgs
 from zllm.worker.llama31 import precompute_freqs_cis
 from zllm.core.datatypes.sequence import Sequence
 
