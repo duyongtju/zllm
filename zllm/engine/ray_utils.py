@@ -54,4 +54,5 @@ def initialize_cluster(
             "Ray is not installed. Please install Ray to use distributed " "serving."
         )
     # Connect to a ray cluster.
-    ray.init(address=ray_address, ignore_reinit_error=True)
+    # 调试时 local_mode=True ref: https://stackoverflow.com/questions/71860615/how-to-disable-ray-for-debugging
+    ray.init(address=ray_address, ignore_reinit_error=True, local_mode=True)
