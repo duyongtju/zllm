@@ -4,7 +4,6 @@ import random
 from typing import List, Mapping, Optional, Tuple
 from torch import nn
 import torch
-from xformers import ops as xops
 import math
 
 
@@ -13,71 +12,8 @@ from flash_attn import flash_attn_with_kvcache
 import flashinfer
 
 
-from zllm.config.config import ModelArgs, CacheConfig, ModelConfig, ParallelConfig
+from zllm.config.config import CacheConfig, ModelConfig, ParallelConfig
 from zllm.core.datatypes.sequence import Sequence, SequenceMetadata
-
-
-class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
-        super().__init__()
-        # self.flash = args.flash # use flash attention?
-        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        # model_parallel_size = fs_init.get_model_parallel_world_size()
-        model_parallel_size = 1 # AK: model parallel size is 1 for 1 GPU
-        self.n_local_heads = args.n_heads // model_parallel_size
-        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
-        self.head_dim = args.dim // args.n_heads
-
-        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False )
-        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-
-        # will be KVCache object managed by inference context manager
-        # self.cache = None
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        # attention_wrapper: BaseAttentionWrapper = None,
-    ):
-        bsz, seqlen, _ = x.shape
-        # calculate query, key, value and split out heads
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        # rotate query, keys (RoPE)
-        xq = apply_rotary_emb(xq, freqs_cis)
-        xk = apply_rotary_emb(xk, freqs_cis)
-        # KV cache update
-        if self.cache is not None:
-            # update the KV cache with current KV and get all the previous KVs
-            xk, xv = self.cache.update(start_pos, xk, xv)
-        # repeat k/v heads if n_kv_heads < n_heads (GQA)
-        xk = repeat_kv(xk, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        xv = repeat_kv(xv, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        # make heads be a batch dim
-        xq, xk, xv = (x.transpose(1, 2) for x in (xq, xk, xv))
-        # attention
-        if self.flash:
-            output = F.scaled_dot_product_attention(xq, xk, xv, mask)
-        else:
-            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
-                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
-            # concatenate all the heads
-            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        # output projection
-        proj = self.wo(output)
-        return proj
-
 
 class BaseAttentionWrapper:
     def __init__(
@@ -104,10 +40,6 @@ class BaseAttentionWrapper:
         self.flash_attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             torch.empty(128*1024*1024, dtype=torch.uint8, device="cuda")
         )
-        # self.cache_config: CacheConfig = kwargs.pop('cache_config', {})
-        # self.cache = self.init_cache_engine()
-
-        # self.attn = Attention(self.model_config)
         
     def init_gpu_cache(
         self, 
@@ -148,170 +80,82 @@ class BaseAttentionWrapper:
             )
         )
 
-    def begin_forward(self, seq_list: List[Sequence]):
+    def begin_forward(self, seq_metadata_list: List[SequenceMetadata]):
         # prepare qo_indptr for example [0, 33, 44, 55, 66, 77, 88, 100]
         # paged_kv_indices [ 1, 2, 3, 4, 5 ]
         # paged_kv_indptr [ 0, 2, 5, ...] seq_1 page: 1 2; seq_2 page 3 4 5  
         # paged_kv_last_page_len [1, 7, 14, 4, 3, 1, 16]  1 <= paged_kv_last_page_len <= page_size
         qo_indptr = [0]        
-        paged_kv_indices = []
-        paged_kv_indptr = [0]
-        paged_kv_last_page_len = []
-
-        append_qo_indptr = [0]
-        append_kv_page_indices = []
-        append_kv_page_indptr = [0]
-        append_kv_last_page_len = []
-
-
-        for seq in seq_list:                
-            seq_id = int(seq.seq_id)
-            if seq.prompt_processing_finished: # prefill phase
-                continue
-            last_page_len = seq.get_prompt_len() % self.block_size or self.block_size
-
-            qo_indptr.append(qo_indptr[-1]+len(seq.prompt_token_ids))
-            kv_page_start = 0
-            kv_page_num = (len(seq.prompt_token_ids) + self.block_size -1) // self.block_size
-            paged_kv_indices.extend(self.block_tables[seq_id][kv_page_start:kv_page_num])
-            paged_kv_indptr.append(paged_kv_indptr[-1]+kv_page_num)
-            paged_kv_last_page_len.append(last_page_len)
-
-            append_qo_indptr.append(append_qo_indptr[-1]+len(seq.prompt_token_ids))
-            append_kv_page_start = 0
-            append_kv_page_end = (len(seq.prompt_token_ids) + self.block_size -1) // self.block_size
-            append_kv_page_indices.extend(self.block_tables[seq_id][append_kv_page_start:append_kv_page_end])
-            append_kv_page_indptr.append(append_kv_page_indptr[-1]+append_kv_page_end-append_kv_page_start)
-            append_kv_last_page_len.append(last_page_len)
-
-        for seq in seq_list:
-            seq_id = int(seq.seq_id)
-            if not seq.prompt_processing_finished: # decode phase
-                continue
-            context_len = len(seq.get_token_ids())
-            last_page_len = context_len%self.block_size or self.block_size
-
-            qo_indptr.append(qo_indptr[-1]+1)
-
-            kv_page_start = (context_len + self.block_size -1) // self.block_size -1
-            kv_page_num = (context_len + self.block_size -1) // self.block_size
-
-            paged_kv_indices.extend(self.block_tables[seq_id][kv_page_start:kv_page_num])
-            paged_kv_indptr.append(paged_kv_indptr[-1]+1)
-            paged_kv_last_page_len.append(last_page_len)
-
-            append_qo_indptr.append(append_qo_indptr[-1]+1)
-            append_kv_page_indices.extend(self.block_tables[seq_id][kv_page_start:kv_page_num])
-            append_kv_page_indptr.append(append_kv_page_indptr[-1]+1)
-            append_kv_last_page_len.append(last_page_len)
-        
-        qo_indptr = self.to_int_tensor(qo_indptr)
-        paged_kv_indptr = self.to_int_tensor(paged_kv_indptr)
-        paged_kv_indices = self.to_int_tensor(paged_kv_indices)
-        paged_kv_last_page_len = self.to_int_tensor(paged_kv_last_page_len)
-
-        self.append_qo_indptr_tensor = self.to_int_tensor(append_qo_indptr)
-        self.append_kv_page_indices_tensor = self.to_int_tensor(append_kv_page_indices)
-        self.append_kv_page_indptr_tensor = self.to_int_tensor(append_kv_page_indptr)
-        self.append_kv_last_page_len_tensor = self.to_int_tensor(append_kv_last_page_len)
-
-        print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {paged_kv_indptr}")
-        print(f"paged_kv_indices {paged_kv_indices} \npaged_kv_last_page_len {paged_kv_last_page_len}")
-        print(f"self.block_tables {self.block_tables}")
-
-        self.flash_attn_wrapper.plan(
-            qo_indptr,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
-            self.model_config.n_heads,
-            self.num_kv_heads,
-            self.model_config.dim,
-            self.block_size,
-            causal=True
-        )
-
-    def begin_forward2(self, seq_list: List[SequenceMetadata]):
-        # prepare qo_indptr for example [0, 33, 44, 55, 66, 77, 88, 100]
-        # paged_kv_indices [ 1, 2, 3, 4, 5 ]
-        # paged_kv_indptr [ 0, 2, 5, ...] seq_1 page: 1 2; seq_2 page 3 4 5  
-        # paged_kv_last_page_len [1, 7, 14, 4, 3, 1, 16]  1 <= paged_kv_last_page_len <= page_size
-        qo_indptr = [0]        
-        paged_kv_indices = []
-        paged_kv_indptr = [0]
-        paged_kv_last_page_len = []
-
-        append_qo_indptr = [0]
-        append_kv_page_indices = []
-        append_kv_page_indptr = [0]
-        append_kv_last_page_len = []
+        kv_page_indices = []
+        kv_page_indptr = [0]
+        kv_page_last_page_len = []
 
         self.block_tables = {}
 
-        for seq in seq_list:                
-            if not seq.is_prompt: # prefill phase
+        self.contains_decode = False
+        self.contains_encode = False
+
+        for seq_metadata in seq_metadata_list:
+            if seq_metadata.is_prompt: # decode phase
                 continue
-            context_len = seq.num_prompt_tokens         
+            
+            self.contains_decode = True
 
-            last_page_len = context_len % self.block_size or self.block_size
-
-            qo_indptr.append(qo_indptr[-1]+context_len)
-            kv_page_start = 0
-            kv_page_num = (context_len + self.block_size -1) // self.block_size
-            paged_kv_indices.extend(seq.block_table[kv_page_start:kv_page_num])
-            paged_kv_indptr.append(paged_kv_indptr[-1]+kv_page_num)
-            paged_kv_last_page_len.append(last_page_len)
-
-            append_qo_indptr.append(append_qo_indptr[-1]+context_len)
-            append_kv_page_start = 0
-            append_kv_page_end = (context_len + self.block_size -1) // self.block_size
-            append_kv_page_indices.extend(seq.block_table[append_kv_page_start:append_kv_page_end])
-            append_kv_page_indptr.append(append_kv_page_indptr[-1]+append_kv_page_end-append_kv_page_start)
-            append_kv_last_page_len.append(last_page_len)
-
-            self.block_tables[seq.seq.seq_id] = seq.block_table
-
-        for seq in seq_list:
-            if seq.is_prompt: # decode phase
-                continue
-            context_len = len(seq.seq.get_token_ids())
-            last_page_len = context_len%self.block_size or self.block_size
+            context_len = seq_metadata.seq.get_len()
 
             qo_indptr.append(qo_indptr[-1]+1)
 
-            kv_page_start = (context_len + self.block_size -1) // self.block_size -1
-            kv_page_num = (context_len + self.block_size -1) // self.block_size
+            num_blocks_in_use = (context_len + self.block_size -1) // self.block_size
 
-            paged_kv_indices.extend(seq.block_table[kv_page_start:kv_page_num])
-            paged_kv_indptr.append(paged_kv_indptr[-1]+1)
-            paged_kv_last_page_len.append(last_page_len)
+            kv_page_indices.extend(seq_metadata.block_table[:num_blocks_in_use])
+            kv_page_indptr.append(kv_page_indptr[-1]+num_blocks_in_use)
+            kv_page_last_page_len.append(
+                context_len % self.block_size or self.block_size
+            )
 
-            append_qo_indptr.append(append_qo_indptr[-1]+1)
-            append_kv_page_indices.extend(seq.block_table[kv_page_start:kv_page_num])
-            append_kv_page_indptr.append(append_kv_page_indptr[-1]+1)
-            append_kv_last_page_len.append(last_page_len)
+            self.block_tables[seq_metadata.seq.seq_id] = seq_metadata.block_table
+        
+        for seq_metadata in seq_metadata_list:                
+            if not seq_metadata.is_prompt: # prefill phase
+                continue
+            
+            self.contains_encode = True
 
-            self.block_tables[seq.seq.seq_id] = seq.block_table
+            prompt_chunk_len = seq_metadata.prompt_chunk_len
+            processed_prompt_len = (
+                seq_metadata.seq.get_num_prompt_tokens_stage_processed()
+            )
+            current_total_len = processed_prompt_len + prompt_chunk_len
+
+            qo_indptr.append(qo_indptr[-1] + prompt_chunk_len)
+            num_blocks_in_use = (
+                current_total_len+self.block_size -1
+            ) // self.block_size
+
+            kv_page_indices.extend(seq_metadata.block_table[:num_blocks_in_use])
+            kv_page_indptr.append(
+                kv_page_indptr[-1] + num_blocks_in_use
+            )
+            kv_page_last_page_len.append(
+                current_total_len % self.block_size or self.block_size
+            )
+
+            self.block_tables[seq_metadata.seq.seq_id] = seq_metadata.block_table
         
         qo_indptr = self.to_int_tensor(qo_indptr)
-        paged_kv_indptr = self.to_int_tensor(paged_kv_indptr)
-        paged_kv_indices = self.to_int_tensor(paged_kv_indices)
-        paged_kv_last_page_len = self.to_int_tensor(paged_kv_last_page_len)
+        kv_page_indptr = self.to_int_tensor(kv_page_indptr)
+        kv_page_indices = self.to_int_tensor(kv_page_indices)
+        kv_page_last_page_len = self.to_int_tensor(kv_page_last_page_len)
 
-        self.append_qo_indptr_tensor = self.to_int_tensor(append_qo_indptr)
-        self.append_kv_page_indices_tensor = self.to_int_tensor(append_kv_page_indices)
-        self.append_kv_page_indptr_tensor = self.to_int_tensor(append_kv_page_indptr)
-        self.append_kv_last_page_len_tensor = self.to_int_tensor(append_kv_last_page_len)
-
-        print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {paged_kv_indptr}")
-        print(f"paged_kv_indices {paged_kv_indices} \npaged_kv_last_page_len {paged_kv_last_page_len}")
+        print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {kv_page_indptr}")
+        print(f"paged_kv_indices {kv_page_indices} \npaged_kv_last_page_len {kv_page_last_page_len}")
         print(f"self.block_tables {self.block_tables}")
 
         self.flash_attn_wrapper.plan(
             qo_indptr,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
+            kv_page_indptr,
+            kv_page_indices,
+            kv_page_last_page_len,
             self.num_q_heads,
             self.num_kv_heads,
             self.head_dim,
@@ -319,6 +163,10 @@ class BaseAttentionWrapper:
             causal=True
         )
 
+        self.append_qo_indptr_tensor = self.to_int_tensor(qo_indptr)
+        self.append_kv_page_indices_tensor = self.to_int_tensor(kv_page_indices)
+        self.append_kv_page_indptr_tensor = self.to_int_tensor(kv_page_indptr)
+        self.append_kv_last_page_len_tensor = self.to_int_tensor(kv_page_last_page_len)
 
     def end_forward(self):
         self.flash_attn_wrapper.end_forward()
@@ -439,18 +287,6 @@ class BaseAttentionWrapper:
         proj = self.wo(output)
         return proj
     
-
-    def raw_forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        # attention_wrapper: BaseAttentionWrapper = None,
-    ):
-        return super(BaseAttentionWrapper, self).forward(
-            x, start_pos, freqs_cis, mask,
-        )
    
 def apply_rotary_emb(x, freqs_cis):
     # shape gymnastics let's go
@@ -482,18 +318,3 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .expand(bs, slen, n_kv_heads, n_rep, head_dim)
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
-
-class KVCache(nn.Module):
-    def __init__(self, batch_size, seq_length, n_kv_heads, head_dim, dtype, device):
-        super().__init__()
-        cache_shape = (batch_size, seq_length, n_kv_heads, head_dim)
-        self.register_buffer("cache_k", torch.zeros(cache_shape, dtype=dtype, device=device))
-        self.register_buffer("cache_v", torch.zeros(cache_shape, dtype=dtype, device=device))
-
-    def update(self, start_pos, xk, xv):
-        seqlen = xk.size(1)
-        self.cache_k[:, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:, start_pos : start_pos + seqlen] = xv
-        xk = self.cache_k[:, : start_pos + seqlen]
-        xv = self.cache_v[:, : start_pos + seqlen]
-        return xk, xv
