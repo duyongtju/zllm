@@ -147,9 +147,9 @@ class BaseAttentionWrapper:
         kv_page_indices = self.to_int_tensor(kv_page_indices)
         kv_page_last_page_len = self.to_int_tensor(kv_page_last_page_len)
 
-        print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {kv_page_indptr}")
-        print(f"paged_kv_indices {kv_page_indices} \npaged_kv_last_page_len {kv_page_last_page_len}")
-        print(f"self.block_tables {self.block_tables}")
+        # print(f"qo_indptr {qo_indptr} \npaged_kv_indptr {kv_page_indptr}")
+        # print(f"paged_kv_indices {kv_page_indices} \npaged_kv_last_page_len {kv_page_last_page_len}")
+        # print(f"self.block_tables {self.block_tables}")
 
         self.flash_attn_wrapper.plan(
             qo_indptr,
@@ -163,10 +163,10 @@ class BaseAttentionWrapper:
             causal=True
         )
 
-        self.append_qo_indptr_tensor = self.to_int_tensor(qo_indptr)
-        self.append_kv_page_indices_tensor = self.to_int_tensor(kv_page_indices)
-        self.append_kv_page_indptr_tensor = self.to_int_tensor(kv_page_indptr)
-        self.append_kv_last_page_len_tensor = self.to_int_tensor(kv_page_last_page_len)
+        self.append_qo_indptr_tensor = qo_indptr
+        self.append_kv_page_indices_tensor = kv_page_indices
+        self.append_kv_page_indptr_tensor = kv_page_indptr
+        self.append_kv_last_page_len_tensor = kv_page_last_page_len
 
     def end_forward(self):
         self.flash_attn_wrapper.end_forward()
@@ -185,17 +185,17 @@ class BaseAttentionWrapper:
         key = key.contiguous().reshape(-1, self.num_kv_heads, self.head_dim)
         value = value.contiguous().reshape(-1, self.num_kv_heads, self.head_dim)
         
-        if layer_cache_idx == 0:
-            print(f"layer {layer_cache_idx} \n"+"="*20)
-            print(f"query {query.shape}")
-            print(f"key {key.shape}")
-            print(f"value {value.shape}")
-            print(f"layered_kv_cahce[{layer_cache_idx}][0]: {self.layered_kv_cahce[layer_cache_idx][0].shape}")
-            print(f"self.append_qo_indptr_tensor {self.append_qo_indptr_tensor}")
-            print(f"self.append_kv_page_indices_tensor {self.append_kv_page_indices_tensor}")
-            print(f"self.append_kv_page_indptr_tensor {self.append_kv_page_indptr_tensor}")
-            print(f"self.append_kv_last_page_len_tensor {self.append_kv_last_page_len_tensor}")
-            print("\n\n")
+        # if layer_cache_idx == 0:
+        #     print(f"layer {layer_cache_idx} \n"+"="*20)
+        #     print(f"query {query.shape}")
+        #     print(f"key {key.shape}")
+        #     print(f"value {value.shape}")
+        #     print(f"layered_kv_cahce[{layer_cache_idx}][0]: {self.layered_kv_cahce[layer_cache_idx][0].shape}")
+        #     print(f"self.append_qo_indptr_tensor {self.append_qo_indptr_tensor}")
+        #     print(f"self.append_kv_page_indices_tensor {self.append_kv_page_indices_tensor}")
+        #     print(f"self.append_kv_page_indptr_tensor {self.append_kv_page_indptr_tensor}")
+        #     print(f"self.append_kv_last_page_len_tensor {self.append_kv_last_page_len_tensor}")
+        #     print("\n\n")
 
         flashinfer.append_paged_kv_cache(
             key,
