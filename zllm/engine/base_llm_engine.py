@@ -9,8 +9,6 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-
 
 from llama.generation import Llama
 from llama.generation import set_up
@@ -20,7 +18,7 @@ from zllm.core.scheduler.scheduler_registry import SchedulerRegistry
 from zllm.engine.ray_utils import RayWorker, initialize_cluster
 from zllm.logger import init_logger
 from zllm.utils import Counter, get_ip, unset_cuda_visible_devices
-from zllm.config.config import SystemConfig, CacheConfig, ParallelConfig
+from zllm.config.config import SystemConfig, CacheConfig, ParallelConfig, ModelConfig
 from zllm.core.datatypes.request_output import RequestOutput
 from zllm.core.datatypes.sampling_params import SamplingParams
 from zllm.core.datatypes.scheduler_output import SchedulerOutputs
@@ -227,6 +225,9 @@ class BaseLLMEngine:
             **kwargs,
         )
         return sampler_outputs[0]
+
+    def get_model_config(self) -> ModelConfig:
+        return self.config.model_config
 
     def add_request(
         self,
