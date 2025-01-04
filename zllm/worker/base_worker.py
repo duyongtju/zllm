@@ -65,7 +65,7 @@ class BaseWorker:
 
         logger.info(f"Worker {self.rank} is using device {self.local_rank}")
         self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
+        # torch.cuda.set_device(self.device)
 
         _init_distributed_environment(
             self.config.parallel_config,

@@ -10,11 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 
-from llama.generation import Llama
-from llama.generation import set_up
-
 from zllm.core.datatypes.comm_info import CommInfo
 from zllm.core.scheduler.scheduler_registry import SchedulerRegistry
+from zllm.engine.multiproc_utils import ProcessWorkerWrapper, ResultHandler
 from zllm.engine.ray_utils import RayWorker, initialize_cluster
 from zllm.logger import init_logger
 from zllm.utils import Counter, get_ip, unset_cuda_visible_devices
@@ -72,10 +70,12 @@ class BaseLLMEngine:
         self.worker_map: Dict[ModelParallelRank, int] = {}
 
         # Initialize the cluster.
-        initialize_cluster()
+        # initialize_cluster()
 
         # Create the parallel GPU workers.
-        self._init_workers_ray()
+        self._init_workers()
+
+        self._init_model()
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
@@ -103,6 +103,39 @@ class BaseLLMEngine:
         )
 
         return BaseWorker
+
+    def _init_workers(self):
+        self._init_worker_multiproc()
+
+
+    def _init_worker_multiproc(self):
+        resource_mapping = self.config.replica_config.get_resource_mapping(
+            self.config.parallel_config.world_size
+        )
+        logger.info(f"Starting workers with resource mapping: {resource_mapping}")
+
+        self.workers: List[ProcessWorkerWrapper] = []
+        result_handler = ResultHandler()
+
+        config = copy.deepcopy(self.config)
+        worker_impl = self._get_worker_impl()
+        
+        driver_ip = get_ip()
+        self.comm_info = CommInfo(driver_ip)
+
+        self.workers = [
+            ProcessWorkerWrapper(
+                result_handler,
+                partial(worker_impl,
+                        config,
+                        local_rank=rank,
+                        rank=0,
+                        comm_info=self.comm_info,
+                        )
+            ) for rank, (node_ip, _) in enumerate(resource_mapping) ]
+
+        result_handler.start()
+
 
     def _init_workers_ray(self, **ray_remote_kwargs):
         resource_mapping = self.config.replica_config.get_resource_mapping(
@@ -163,6 +196,12 @@ class BaseLLMEngine:
             )
             ray.get(promise)
 
+        self._run_workers(
+            "init_model",
+            get_all_outputs=True,
+        )
+
+    def _init_model(self) -> None:
         self._run_workers(
             "init_model",
             get_all_outputs=True,
@@ -348,6 +387,52 @@ class BaseLLMEngine:
         )
 
     def _run_workers(
+        self, 
+        method:str,
+        *args,
+        get_all_outputs: bool = False,
+        ignore_output: bool = False,
+        **kwargs,
+    )-> Any:
+        return self._run_workers_multiproces(
+            method,
+            *args,
+            get_all_outputs=get_all_outputs,
+            ignore_output=ignore_output,
+            **kwargs
+        )
+
+
+    def _run_workers_multiproces(
+        self, 
+        method:str,
+        *args,
+        get_all_outputs: bool = False,
+        ignore_output: bool = False,
+        **kwargs,
+    )-> Any:
+        
+        all_outputs: List[Any] = []
+        for worker in self.workers:
+            output = worker.execute_method(method, *args, **kwargs)
+            all_outputs.append(output)
+        
+        if ignore_output:
+            return
+        
+        results = [ output.get() for output in all_outputs]
+
+        if get_all_outputs:
+            return results
+
+        # Make sure all workers have the same results.
+        result = results[0]
+        for other_result in all_outputs[1:]:
+            assert result == other_result
+        return result
+
+
+    def _run_workers_ray(
         self,
         method: str,
         *args,
@@ -383,7 +468,7 @@ class BaseLLMEngine:
             assert output == other_output
         return output
 
-    def _run_worker(
+    def _run_worker_ray(
         self,
         model_parallel_rank: ModelParallelRank,
         method: str,
