@@ -69,7 +69,7 @@ class BaseWorker:
 
         _init_distributed_environment(
             self.config.parallel_config,
-            self.rank,
+            self.local_rank,
             self.comm_info.distributed_init_method,
         )
         
@@ -96,7 +96,7 @@ class BaseWorker:
             self.device,
             self.rank,
         )
-        logger.info(f"Model initialized on worker {self.rank}.")
+        logger.info(f"Model initialized on worker {self.rank} local_rank {self.local_rank}.")
 
     @synchronized
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
