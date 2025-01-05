@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
 import os
 import sys
@@ -7,7 +8,7 @@ import threading
 import multiprocessing
 from multiprocessing import Queue
 import traceback
-from typing import Any, Callable, Dict, Generic, Optional, TextIO, TypeVar, Union
+from typing import Any, Callable, Dict, Generic, List, Optional, TextIO, TypeVar, Union
 import uuid
 
 from zllm.logger import init_logger
@@ -23,6 +24,7 @@ _TERMINATE = "TERMINATE"  # sentinel
 CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
+JOIN_TIMEOUT_S = 2
 
 # mp_method = "fork"
 mp_method = "spawn"
@@ -87,6 +89,48 @@ class ResultHandler(threading.Thread):
         
     def close(self):
         self.result_queue.put(_TERMINATE)
+
+
+class WorkerMonitor(threading.Thread):
+
+    def __init__(self, workers: List['ProcessWorkerWrapper'],
+                 result_handler: ResultHandler):
+        super().__init__(daemon=True)
+        self.workers: List['ProcessWorkerWrapper'] = workers
+        self.result_hander = result_handler
+        self._close: bool = False
+
+    def run(self):
+        dead_sentinels = wait([ worker.process.sentinel for worker in self.workers])
+        if not self._close:
+            self._close = True
+
+            for worker in self.workers:
+                process = worker.process
+                if process.sentinel in dead_sentinels:
+                    process.join(JOIN_TIMEOUT_S)
+                if process.exitcode is not None and process.exitcode != 0:
+                    logger.error("Worker %s pid %s died, exit code %s",
+                                 process.name, process.pid, process.exitcode)
+                
+                logger.info("Killing local vLLM worker processes")
+                for worker in self.workers:
+                    worker.kill_worker()
+
+                self.result_hander.close()
+
+            for worker in self.workers:
+                worker.process.join(JOIN_TIMEOUT_S)
+
+    def close(self):
+        if self.close:
+            return
+        self._close = True
+        logger.info("Terminating local zLLM worker process")
+        for worker in self.workers:
+            worker.terminate_worker()
+            
+        self.result_hander.close()
 
 class ProcessWorkerWrapper:
 

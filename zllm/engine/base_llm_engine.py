@@ -12,7 +12,7 @@ import ray
 
 from zllm.core.datatypes.comm_info import CommInfo
 from zllm.core.scheduler.scheduler_registry import SchedulerRegistry
-from zllm.engine.multiproc_utils import ProcessWorkerWrapper, ResultHandler
+from zllm.engine.multiproc_utils import ProcessWorkerWrapper, ResultHandler, WorkerMonitor
 from zllm.engine.ray_utils import RayWorker, initialize_cluster
 from zllm.logger import init_logger
 from zllm.utils import Counter, get_ip, unset_cuda_visible_devices
@@ -134,7 +134,9 @@ class BaseLLMEngine:
                         )
             ) for rank, (node_ip, _) in enumerate(resource_mapping) ]
 
+        worker_monitor = WorkerMonitor(self.workers, result_handler)
         result_handler.start()
+        worker_monitor.start()
 
 
     def _init_workers_ray(self, **ray_remote_kwargs):
