@@ -1,7 +1,7 @@
 
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Optional
 from zllm.transformer_utils.config import get_config
 from zllm.types import ResourceMapping, SchedulerType
@@ -222,3 +222,7 @@ class SystemConfig:
         default_factory=VllmSchedulerConfig
     )
     # metrics_config: MetricsConfig = field(default_factory=MetricsConfig)
+
+    def to_dict(self):
+        return dict(
+            (field.name, getattr(self, field.name)) for field in fields(self))
