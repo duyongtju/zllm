@@ -112,7 +112,7 @@ int main(int argc, char **argv)
     printf("%s using Device %d: %s\n", argv[0], dev, deviceProp.name);
 
     // set up data size
-    int size = 64;
+    int size = 128;
     int blocksize = 64;
 
     if(argc > 1) blocksize = atoi(argv[1]);
