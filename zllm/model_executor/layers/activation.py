@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from zllm import activation_ops
+
 class Silu(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -26,5 +28,12 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        num_tokens = x.shape[0]
+        d = x.shape[1] // 2
+        out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
+        activation_ops.silu_and_mul(out, x)
+        return out
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_native(x)
+        return self.forward_cuda(x)
