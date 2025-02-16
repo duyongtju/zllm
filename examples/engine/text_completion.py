@@ -26,7 +26,7 @@ cache_config = CacheConfig(
 )
 parallel_config = ParallelConfig(
     pipeline_parallel_size=1,
-    tensor_parallel_size=1,    
+    tensor_parallel_size=2,    
 )
 config = SystemConfig(
     model_config=model_config,

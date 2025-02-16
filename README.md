@@ -12,8 +12,7 @@
 - **TP inference**
   - 参考 Megatron 切分模型，通过 Tensor Parallelism (TP) 多卡并行推理，不支持 Pipeline 并行。
   - 引入自定义的 load_weights 方法，从而在不同的卡上加载不同的权重。
-- **用ray实现进程管理**
-  - worker 和 engine 分离在不同的进程中，worker 负责执行推理，engine 负责调度。
+  - 支持 ray 和 multiprocessing 实现 worker 管理，从而实现多卡并行推理。
 - **flash attention**: 实现了基于flash attention的推理，引入 flashinfer 库，实现了高效的注意力计算。可以在 examples/attention 目录下找到相关示例代码。
 - **从HF加载模型**: 支持加载 HF 上的模型，目前仅支持 llama3.1，未来计划支持更多模型。
 

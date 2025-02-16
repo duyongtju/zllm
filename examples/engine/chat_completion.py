@@ -1,15 +1,14 @@
-from typing import List
+from typing import Dict, List
 
 from transformers import AutoTokenizer
 
-from llama.tokenizer import Dialog
 from zllm.config.config import CacheConfig, ModelConfig, ParallelConfig, SystemConfig, VllmSchedulerConfig
 from zllm.core.datatypes.request_output import RequestOutput
 from zllm.core.datatypes.sampling_params import SamplingParams
 from zllm.engine.base_llm_engine import BaseLLMEngine
 
 
-ckpt_dir = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct/'
+ckpt_dir = '/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct'
 model_config: ModelConfig = ModelConfig(
     model=ckpt_dir,
     trust_remote_code=True,
@@ -25,7 +24,7 @@ cache_config = CacheConfig(
 )
 parallel_config = ParallelConfig(
     pipeline_parallel_size=1,
-    tensor_parallel_size=1,    
+    tensor_parallel_size=2,    
 )
 config = SystemConfig(
     model_config=model_config,
@@ -37,7 +36,7 @@ def main():
 
     engine = BaseLLMEngine(config)
 
-    dialogs: List[Dialog] = [
+    dialogs: List[List[Dict[str, str]]] = [
         [
             {"role": "user", "content": "what is the recipe of mayonnaise?"}
         ],

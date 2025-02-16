@@ -244,10 +244,10 @@ class BaseAttentionWrapper:
         if self.kv_cache is not None:
             # print("xq.shape", xq.shape)
             # print("xk.shape", xk.shape)
-            if self.layer is not None and self.layer == 0:
-                print(f"k_cache.shape {self.kv_cache[0].shape}")
-                print(f"cached_seq_len {self.cached_seq_len}")
-                print(f"block_tables {self.block_tables}")
+            # if self.layer is not None and self.layer == 0:
+            #     print(f"k_cache.shape {self.kv_cache[0].shape}")
+            #     print(f"cached_seq_len {self.cached_seq_len}")
+            #     print(f"block_tables {self.block_tables}")
             output = flash_attn_with_kvcache(
                 xq, 
                 self.kv_cache[0], 
