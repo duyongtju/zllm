@@ -1,0 +1,26 @@
+ninja  # For faster builds.
+psutil
+ray >= 2.5.1
+pandas  # Required for Ray data.
+pyarrow  # Required for Ray data.
+sentencepiece  # Required for LLaMA tokenizer.
+numpy
+torch == 2.4
+transformers >= 4.37.0  # Required for Mistral.
+matplotlib
+plotly_express
+seaborn
+wandb
+kaleido
+ddsketch
+jupyterlab
+#flashinfer-python
+#pip install flashinfer-python -i https://flashinfer.ai/whl/cu121/torch2.4/
+pillow
+tiktoken
+grpcio
+uvicorn
+fastapi
+openai
+tqdm
+
