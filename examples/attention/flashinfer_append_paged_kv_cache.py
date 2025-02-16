@@ -1,8 +1,8 @@
 import torch
 import flashinfer
 
-num_kv_heads = 32
 nnz_kv = 100
+num_kv_heads = 32
 head_dim = 128
 k_append = torch.randn(nnz_kv, num_kv_heads, head_dim).half().to(0)
 v_append = torch.randn(nnz_kv, num_kv_heads, head_dim).half().to(0)
@@ -25,13 +25,17 @@ kv_page_indices = torch.arange(8, dtype=torch.int32, device="cuda:0")
 # 25 = (2 - 1) * 16 + 9
 # 22 = (2 - 1) * 16 + 6
 kv_last_page_len = torch.tensor([13, 8, 9, 6], dtype=torch.int32, device="cuda:0")
+batch_indices, positions = flashinfer.get_batch_indices_positions(
+    kv_append_indptr, flashinfer.get_seq_lens(kv_page_indptr, kv_last_page_len, page_size), nnz_kv
+)
 print(f"k_append {k_append.shape} \nv_append {v_append.shape} \nkv_append_indptr {kv_append_indptr}")
 print(f"paged_kv_cache {paged_kv_cache.shape} \nkv_page_indices {kv_page_indices} \nkv_page_indptr {kv_page_indptr}")
 print(f"kv_last_page_len {kv_last_page_len}")
 flashinfer.append_paged_kv_cache(
     k_append,
     v_append,
-    kv_append_indptr,
+    batch_indices,
+    positions,
     paged_kv_cache,
     kv_page_indices,
     kv_page_indptr,
