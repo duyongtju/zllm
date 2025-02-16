@@ -10,9 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 
-from llama.generation import Llama
-from llama.generation import set_up
-
 from zllm.core.datatypes.comm_info import CommInfo
 from zllm.core.scheduler.scheduler_registry import SchedulerRegistry
 from zllm.engine.ray_utils import RayWorker, initialize_cluster

@@ -8,7 +8,7 @@ import math
 
 
 import torch.nn.functional as F
-from flash_attn import flash_attn_with_kvcache
+# from flash_attn import flash_attn_with_kvcache
 import flashinfer
 
 
