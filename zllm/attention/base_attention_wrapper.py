@@ -8,7 +8,7 @@ import math
 
 
 import torch.nn.functional as F
-from flash_attn import flash_attn_with_kvcache
+# from flash_attn import flash_attn_with_kvcache
 import flashinfer
 
 
@@ -142,6 +142,7 @@ class BaseAttentionWrapper:
 
             self.block_tables[seq_metadata.seq.seq_id] = seq_metadata.block_table
         
+        nnz_kv = qo_indptr[-1]
         qo_indptr = self.to_int_tensor(qo_indptr)
         kv_page_indptr = self.to_int_tensor(kv_page_indptr)
         kv_page_indices = self.to_int_tensor(kv_page_indices)
@@ -160,7 +161,13 @@ class BaseAttentionWrapper:
             self.num_kv_heads,
             self.head_dim,
             self.block_size,
-            causal=True
+            causal=True,
+            q_data_type=self.dtype,
+            kv_data_type=self.dtype,
+        )
+
+        self.batch_indices, self.positions = flashinfer.get_batch_indices_positions(
+            qo_indptr, flashinfer.get_seq_lens(kv_page_indptr, kv_page_last_page_len, self.block_size), nnz_kv
         )
 
         self.append_qo_indptr_tensor = qo_indptr
@@ -200,7 +207,8 @@ class BaseAttentionWrapper:
         flashinfer.append_paged_kv_cache(
             key,
             value,
-            self.append_qo_indptr_tensor,
+            self.batch_indices,
+            self.positions,
             self.layered_kv_cahce[layer_cache_idx],
             self.append_kv_page_indices_tensor,
             self.append_kv_page_indptr_tensor,
