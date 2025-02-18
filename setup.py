@@ -98,6 +98,18 @@ activation_extension = CUDAExtension(
 )
 ext_modules.append(activation_extension)
 
+# LayerNorm kernels.
+layernorm_extension = CUDAExtension(
+    name="zllm.layernorm_ops",
+    sources=["csrc/layernorm_kernels.cu", "csrc/layernorm.cpp"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    }
+)
+ext_modules.append(layernorm_extension)
+
+
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
