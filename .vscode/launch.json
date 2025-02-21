@@ -56,7 +56,7 @@
       "stopAtEntry": false,
       "request": "launch",
       "program": "${fileDirname}/test",
-      "preLaunchTask": "mynvcc"
+      "preLaunchTask": "mynvcc",
     }
   ]
 }

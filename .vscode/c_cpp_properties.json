@@ -5,19 +5,13 @@
       "includePath": [
         "/usr/local/cuda/include/",
         "/opt/conda/lib/python3.10/site-packages/torch/include",
-        "${workspaceFolder}"
+        "${workspaceFolder}/**"
         // "${workspaceFolder}/csrc"
       ],
-      // "browse": {
-      //   "path": [
-      //     "${workspaceFolder}/ported/"
-      //   ],
-      //   "limitSymbolsToIncludedHeaders": true
-      // },
       "defines": [],
-      "compilerPath": "/usr/bin/gcc",
+      "compilerPath": "/usr/local/cuda/bin/nvcc",
       "cStandard": "c17",
-      "cppStandard": "gnu++14",
+      "cppStandard": "gnu++17",
       "intelliSenseMode": "linux-gcc-x64",
       "configurationProvider": "ms-vscode.makefile-tools"
     }
