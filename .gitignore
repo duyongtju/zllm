@@ -1,4 +1,7 @@
 
+/ported/
+
+
 # Virtualenv
 /.venv/
 /venv/
@@ -8,7 +11,7 @@ __pycache__/
 *.py[cod]
 
 # C extensions
-# *.so
+*.so
 
 # Distribution / packaging
 /bin/
@@ -26,7 +29,7 @@ __pycache__/
 /.installed.cfg
 /*.egg
 /.eggs
-.vscode
+# .vscode
 .idea
 
 # AUTHORS and ChangeLog will be generated while packaging

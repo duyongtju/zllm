@@ -1,0 +1,62 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "test_py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "examples/attention/flashinfer_append_paged_kv_cache.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "example_chat_completion",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "llama3/example_chat_completion.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--ckpt_dir",
+        "/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/original/",
+        "--tokenizer_path",
+        "/home/duyong/model-zoos/meta-llama/Meta-Llama-3.1-8B-Instruct-oooooooold/original/tokenizer.model",
+        "--max_seq_len",
+        "2048",
+        "--max_batch_size",
+        "6"
+      ]
+    },
+    {
+      "name": "engine",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "examples/engine/chat_completion.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "zllm_api_server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "zllm/entrypoints/api_server.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "vllm_engine",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "zllm/entrypoints/api_server.py",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "CUDA C++: Launch",
+      "type": "cuda-gdb",
+      "stopAtEntry": false,
+      "request": "launch",
+      "program": "${fileDirname}/test",
+      "preLaunchTask": "mynvcc",
+    }
+  ]
+}

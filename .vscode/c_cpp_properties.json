@@ -1,0 +1,20 @@
+{
+  "configurations": [
+    {
+      "name": "Linux",
+      "includePath": [
+        "/usr/local/cuda/include/**",
+        "/opt/conda/lib/python3.10/site-packages/torch/include/**",
+        "${workspaceFolder}/**"
+        // "${workspaceFolder}/csrc"
+      ],
+      "defines": [],
+      "compilerPath": "/usr/local/cuda/bin/nvcc",
+      "cStandard": "c17",
+      "cppStandard": "gnu++17",
+      "intelliSenseMode": "linux-gcc-x64",
+      "configurationProvider": "ms-vscode.makefile-tools"
+    }
+  ],
+  "version": 4
+}
